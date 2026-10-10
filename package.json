@@ -1,0 +1,36 @@
+{
+  "name": "apnadesign",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "node scripts/build-wasm.mjs --check && next build",
+    "wasm:build": "node scripts/build-wasm.mjs",
+    "wasm:test": "cargo test --manifest-path wasm/geometry/Cargo.toml",
+    "start": "NODE_ENV=production tsx server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:multiplayer": "tsx tests/multiplayer.ts",
+    "test:server": "tsx tests/server-security.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.3",
+    "konva": "^10.0.0",
+    "lucide-react": "^0.468.0",
+    "next": "^16.4.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-konva": "^19.0.7",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.0",
+    "prettier": "^3.9.10",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

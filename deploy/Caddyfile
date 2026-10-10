@@ -1,0 +1,22 @@
+65.75.203.202 {
+    tls {
+        issuer acme https://acme-v02.api.letsencrypt.org/directory {
+            profile shortlived
+        }
+    }
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}
+
+apnadesign.ajarafashion.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}

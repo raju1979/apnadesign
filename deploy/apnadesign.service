@@ -1,0 +1,30 @@
+[Unit]
+Description=ApnaDesign web and collaboration server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=apnadesign
+Group=apnadesign
+WorkingDirectory=/opt/apnadesign/current
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+EnvironmentFile=/etc/apnadesign/environment
+ExecStart=/usr/bin/node /opt/apnadesign/current/node_modules/tsx/dist/cli.mjs server.ts
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/apnadesign/current/.next
+MemoryHigh=768M
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

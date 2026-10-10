@@ -1,0 +1,15 @@
+node_modules/
+.next/
+next-env.d.ts
+.data/
+wasm/**/target/
+*.tsbuildinfo
+.env*
+
+!.env.example
+.ssh/
+*.pem
+*.key
+*.log
+.DS_Store
+supabase/.temp/
