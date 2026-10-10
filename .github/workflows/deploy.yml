@@ -1,0 +1,88 @@
+name: CI and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apnadesign-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm exec -- next typegen
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  deploy:
+    name: Deploy to VPS
+    needs: checks
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://apnadesign.ajarafashion.com
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Upload source and deploy
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${VPS_HOST:?Missing VPS_HOST}"
+          : "${VPS_USER:?Missing VPS_USER}"
+          : "${VPS_SSH_KEY:?Missing VPS_SSH_KEY}"
+          : "${VPS_KNOWN_HOSTS:?Missing VPS_KNOWN_HOSTS}"
+          keyfile="$RUNNER_TEMP/apnadesign_deploy_key"
+          knownhosts="$RUNNER_TEMP/apnadesign_known_hosts"
+          trap 'rm -f "$keyfile" "$knownhosts"' EXIT
+          umask 077
+          printf '%s\n' "$VPS_SSH_KEY" > "$keyfile"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$knownhosts"
+          git archive --format=tar "$GITHUB_SHA" | ssh -T \
+            -i "$keyfile" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$knownhosts" \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            "$VPS_USER@$VPS_HOST" "$GITHUB_SHA"
+      - name: Verify deployed revision over HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 6 --retry-delay 5 \
+            --retry-all-errors --max-time 20 \
+            https://apnadesign.ajarafashion.com/api/health > "$RUNNER_TEMP/health.json"
+          python3 - <<'PY'
+          import json, os
+          with open(os.path.join(os.environ['RUNNER_TEMP'], 'health.json')) as response:
+              health = json.load(response)
+          assert health['status'] == 'ok', 'App is not healthy'
+          assert health['release'] == os.environ['GITHUB_SHA'], 'Wrong release is running'
+          print('Verified the deployed commit over HTTPS.')
+          PY

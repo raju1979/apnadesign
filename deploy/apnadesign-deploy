@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 027
+
+# Install as a root-owned file. Never run a deployment script from the archive
+# as root: uploaded source, npm hooks, tests and builds run as apnadesign.
+[[ "$EUID" -eq 0 ]] || { echo 'Run through the installed deployment receiver.' >&2; exit 77; }
+[[ "$#" -eq 1 && "$1" =~ ^[a-f0-9]{40}$ ]] || { echo 'Invalid revision.' >&2; exit 64; }
+revision="$1"
+exec 9>/run/lock/apnadesign-deploy.lock
+flock -w 900 9
+
+root=/opt/apnadesign
+previous="$(readlink -f "$root/current")"
+[[ "$previous" == "$root/releases/"* && -d "$previous" ]] || exit 65
+release="$(mktemp -d "$root/releases/actions-$revision.XXXXXX")"
+environment_backup="$(mktemp /etc/apnadesign/release-backup.XXXXXX)"
+had_environment=0
+switched=0
+if [[ -f /etc/apnadesign/release ]]; then
+    cp /etc/apnadesign/release "$environment_backup"
+    had_environment=1
+fi
+
+point_to() {
+    ln -s "$1" "$root/.current-$$"
+    mv -Tf "$root/.current-$$" "$root/current"
+}
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    if [[ "$status" -ne 0 ]]; then
+        if [[ "$switched" -eq 1 ]]; then
+            echo 'New release failed; restoring the previous release.' >&2
+            point_to "$previous"
+            if [[ "$had_environment" -eq 1 ]]; then
+                install -m 600 "$environment_backup" /etc/apnadesign/release
+            else
+                rm -f /etc/apnadesign/release
+            fi
+            systemctl restart apnadesign || true
+        fi
+        rm -rf --one-file-system "$release"
+    fi
+    rm -f "$environment_backup" "$root/.current-$$"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+chown apnadesign:apnadesign "$release"
+chmod 750 "$release"
+echo "Preparing release $revision"
+runuser -u apnadesign -- tar --extract --file=- --directory="$release" \
+    --no-same-owner --no-same-permissions
+[[ -f "$release/package-lock.json" && -f "$release/server.ts" && ! -e "$release/.env.local" ]] || exit 65
+printf '%s\n' "$revision" | runuser -u apnadesign -- tee "$release/REVISION" >/dev/null
+
+# The existing root-owned file supplies the project's public build variables.
+set -a
+source /etc/apnadesign/environment
+set +a
+export NEXT_TELEMETRY_DISABLED=1
+cd "$release"
+runuser -u apnadesign -- npm ci --no-audit --no-fund
+runuser -u apnadesign -- npm exec -- next typegen
+runuser -u apnadesign -- npm run typecheck
+runuser -u apnadesign -- npm test
+runuser -u apnadesign -- env NODE_OPTIONS=--max-old-space-size=2048 npm run build
+
+switched=1
+printf 'APNADESIGN_RELEASE=%s\n' "$revision" > /etc/apnadesign/release
+chmod 600 /etc/apnadesign/release
+point_to "$release"
+systemctl restart apnadesign
+
+healthy=0
+for attempt in {1..30}; do
+    if curl --fail --silent --max-time 3 http://127.0.0.1:3000/api/health | \
+        python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("status")=="ok" and d.get("release")==sys.argv[1] else 1)' "$revision" 2>/dev/null; then
+        healthy=1
+        break
+    fi
+    sleep 2
+done
+[[ "$healthy" -eq 1 ]] || { echo 'Health check failed.' >&2; exit 1; }
+echo "Deployed and verified $revision"
+
+# Keep the two newest CI releases plus the active and previous releases.
+# Initial/manual releases are never pruned by this helper.
+mapfile -t old_releases < <(find "$root/releases" -mindepth 1 -maxdepth 1 \
+    -type d -name 'actions-*' -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2- | tail -n +3)
+for old in "${old_releases[@]}"; do
+    if [[ "$old" != "$release" && "$old" != "$previous" ]]; then
+        rm -rf --one-file-system "$old"
+    fi
+done

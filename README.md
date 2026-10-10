@@ -2,6 +2,8 @@
 
 [Live demo](https://apnadesign.ajarafashion.com) · [VPS deployment notes](deploy/README.md)
 
+[![CI and deploy](https://github.com/raju1979/apnadesign/actions/workflows/deploy.yml/badge.svg)](https://github.com/raju1979/apnadesign/actions/workflows/deploy.yml)
+
 A collaborative browser design editor with Supabase accounts and database-enforced owner/editor/viewer access. TypeScript across React/Next.js and a Node.js WebSocket backend. React Konva renders the canvas; a Rust/WebAssembly module calculates canvas geometry.
 
 ## Setup
@@ -56,6 +58,7 @@ npm test
 ## Validation
 
 ```sh
+npm exec -- next typegen
 npm run typecheck
 npm test
 npm run build

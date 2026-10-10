@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This root-owned command is forced by the deploy account's authorized key.
+# SSH receives only a commit SHA as the command, and a tar archive on stdin.
+revision="${SSH_ORIGINAL_COMMAND:-}"
+if [[ ! "$revision" =~ ^[a-f0-9]{40}$ ]]; then
+    echo 'Only deployment of a full commit SHA is allowed.' >&2
+    exit 64
+fi
+exec sudo -n /usr/local/sbin/apnadesign-deploy "$revision"
