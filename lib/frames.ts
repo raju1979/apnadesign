@@ -44,9 +44,13 @@ export function withAutomaticFrame(
   if (
     shape.type === "frame" ||
     "frameId" in patch ||
+    !!shape.groupId ||
     !["x", "y", "width", "height", "rotation"].some((key) => key in patch)
   )
     return patch;
   const frameId = containingFrameId({ ...shape, ...patch }, shapes);
   return frameId === (shape.frameId || "") ? patch : { ...patch, frameId };
 }
+
+// Keep container children adjacent without changing canvas stacking.
+export { layers as frameLayerRows } from "./selection";

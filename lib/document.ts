@@ -1,6 +1,8 @@
+import { ancestors } from "./selection";
+import { javascriptBounds } from "./geometry";
 export type Shape = {
   id: string;
-  type: "rect" | "ellipse" | "text" | "image" | "frame";
+  type: "rect" | "ellipse" | "text" | "image" | "frame" | "group";
   name: string;
   x: number;
   y: number;
@@ -17,12 +19,14 @@ export type Shape = {
   fontFamily?: string;
   fontStyle?: "normal" | "bold" | "italic" | "bold italic";
   align?: "left" | "center" | "right";
+  groupId?: string;
   frameId?: string;
   targetFrameId?: string;
 };
 export type Page = { id: string; name: string; shapes: Shape[] };
 export type Document = { title: string; shapes: Shape[]; pages?: Page[] };
 export type Operation =
+  | { kind: "batch"; operations: Operation[] }
   | { kind: "add"; shape: Shape; pageId?: string }
   | { kind: "patch"; id: string; patch: Partial<Shape>; pageId?: string }
   | {
@@ -118,13 +122,35 @@ function updatePage(
 ): Document {
   const pages = getPages(doc);
   if (!pages.some((page) => page.id === pageId)) return doc;
+  const refreshGroups = (items: Shape[]) => {
+    // Children keep page coordinates; group bounds follow their current content.
+    let result = items;
+    for (
+      let pass = 0;
+      pass < items.filter((s) => s.type === "group").length;
+      pass++
+    ) {
+      result = result.map((s) => {
+        if (s.type !== "group") return s;
+        const children = result.filter((child) => child.groupId === s.id);
+        const bounds = javascriptBounds(
+          children.map((child) => ({ ...child, hidden: false })),
+        );
+        return bounds ? { ...s, ...bounds, rotation: 0 } : s;
+      });
+    }
+    return result;
+  };
   const nextPages = pages.map((page) =>
-    page.id === pageId ? { ...page, shapes: update(page.shapes) } : page,
+    page.id === pageId
+      ? { ...page, shapes: refreshGroups(update(page.shapes)) }
+      : page,
   );
   return { ...doc, pages: nextPages, shapes: nextPages[0].shapes };
 }
 
 export function apply(doc: Document, op: Operation): Document {
+  if (op.kind === "batch") return op.operations.reduce(apply, doc);
   if (op.kind === "title") return { ...doc, title: op.title.slice(0, 120) };
   if (op.kind === "title_if")
     return doc.title === op.expected
@@ -165,22 +191,43 @@ export function apply(doc: Document, op: Operation): Document {
       ? updatePage(doc, pageId, (items) => items.filter((s) => s.id !== op.id))
       : doc;
   }
-  if (op.kind === "patch")
-    return updatePage(doc, pageId, (items) =>
-      items.map((s) => (s.id === op.id ? { ...s, ...op.patch, id: s.id } : s)),
-    );
-  if (op.kind === "patch_if")
+  if (op.kind === "patch" || op.kind === "patch_if") {
+    const original = shapes.find((s) => s.id === op.id);
+    if (!original) return doc;
+    const patch =
+      op.kind === "patch"
+        ? op.patch
+        : (Object.fromEntries(
+            Object.entries(op.patch).filter(([key]) =>
+              Object.is(
+                original[key as keyof Shape] ??
+                  (typeof op.expected[key as keyof Shape] === "boolean"
+                    ? false
+                    : ""),
+                op.expected[key as keyof Shape],
+              ),
+            ),
+          ) as Partial<Shape>);
+    const dx = (patch.x ?? original.x) - original.x;
+    const dy = (patch.y ?? original.y) - original.y;
     return updatePage(doc, pageId, (items) =>
       items.map((s) => {
-        if (s.id !== op.id) return s;
-        const patch = Object.fromEntries(
-          Object.entries(op.patch).filter(([key]) =>
-            Object.is(s[key as keyof Shape], op.expected[key as keyof Shape]),
-          ),
-        ) as Partial<Shape>;
-        return { ...s, ...patch, id: s.id };
+        if (s.id === op.id) return { ...s, ...patch, id: s.id };
+        if (
+          (original.type === "frame" || original.type === "group") &&
+          ancestors(s, items).some((parent) => parent.id === original.id) &&
+          (dx || dy || "frameId" in patch)
+        )
+          return {
+            ...s,
+            x: s.x + dx,
+            y: s.y + dy,
+            ...("frameId" in patch ? { frameId: patch.frameId } : {}),
+          };
+        return s;
       }),
     );
+  }
   const i = shapes.findIndex((s) => s.id === op.id);
   if (op.kind === "order_if" && i !== op.expectedIndex) return doc;
   if (i < 0) return doc;
@@ -297,6 +344,19 @@ export function validOperation(value: unknown): value is Operation {
   if (o.kind === "title") return typeof o.title === "string";
   if (o.kind === "title_if")
     return typeof o.expected === "string" && typeof o.title === "string";
+  if (o.kind === "batch")
+    return (
+      Array.isArray(o.operations) &&
+      o.operations.length > 0 &&
+      o.operations.length <= 500 &&
+      o.operations.every(
+        (child) =>
+          child &&
+          typeof child === "object" &&
+          (child as { kind?: unknown }).kind !== "batch" &&
+          validOperation(child),
+      )
+    );
   if (
     o.pageId !== undefined &&
     (typeof o.pageId !== "string" || o.pageId.length > 64)
@@ -332,6 +392,7 @@ export function validOperation(value: unknown): value is Operation {
                 "assetPath",
                 "fontFamily",
                 "frameId",
+                "groupId",
                 "targetFrameId",
               ].includes(k)
             ? typeof v === "string" && v.length < 10000
@@ -340,9 +401,14 @@ export function validOperation(value: unknown): value is Operation {
               : k === "align"
                 ? ["left", "center", "right"].includes(String(v))
                 : k === "type"
-                  ? ["rect", "ellipse", "text", "image", "frame"].includes(
-                      String(v),
-                    )
+                  ? [
+                      "rect",
+                      "ellipse",
+                      "text",
+                      "image",
+                      "frame",
+                      "group",
+                    ].includes(String(v))
                   : false,
     );
   const partial = (value: unknown) =>

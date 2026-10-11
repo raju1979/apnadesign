@@ -1394,3 +1394,107 @@ textarea:disabled {
 .right-sidebar.read-only input[type="color"] {
   cursor: default;
 }
+
+.frame-collapse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 20px;
+  height: 28px;
+  color: #8b919b;
+  border-radius: 4px;
+}
+.frame-collapse:hover {
+  color: #8064ec;
+  background: #eee9ff;
+}
+.frame-collapse:focus-visible {
+  outline: 2px solid #8064ec;
+}
+
+.context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+}
+.object-context-menu {
+  position: fixed;
+  z-index: 101;
+  width: 215px;
+  padding: 6px;
+  background: white;
+  border: 1px solid #e4e5eb;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px #20203026;
+}
+.context-menu-caption {
+  display: block;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: #8b919b;
+}
+.object-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  text-align: left;
+  border-radius: 5px;
+  font-size: 12px;
+}
+.object-context-menu button:hover:not(:disabled),
+.object-context-menu button:focus-visible {
+  background: #eee9ff;
+  color: #8064ec;
+}
+.object-context-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.selection-tools,
+.selection-alignment {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: 48px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #fffffff2;
+  border: 1px solid #e4e5eb;
+  border-radius: 9px;
+  padding: 5px;
+  box-shadow: 0 3px 12px #20203009;
+  max-width: calc(100% - 24px);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.selection-tools span {
+  padding: 0 8px;
+  font-size: 10px;
+  color: #8b919b;
+}
+.selection-tools button,
+.selection-alignment button {
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 5px;
+}
+.selection-tools button:hover:not(:disabled),
+.selection-alignment button:hover:not(:disabled),
+.selection-tools button[aria-pressed="true"] {
+  background: #eee9ff;
+  color: #8064ec;
+}
+.selection-tools button:disabled,
+.selection-alignment button:disabled {
+  opacity: 0.35;
+}
+.selection-alignment {
+  top: 91px;
+}
+.object-context-menu {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}

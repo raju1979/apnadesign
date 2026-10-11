@@ -36,6 +36,10 @@ Multiple pages with independent layers and page-scoped collaborator edits; shape
 
 Keyboard: V select, H pan, Space+drag temporarily pans from any tool, F frame, R rectangle, O ellipse, T text, Delete remove, Cmd/Ctrl+D duplicate, Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z redo. Ctrl/Cmd+scroll zooms around the pointer. Shift+1 or the zoom percentage fits the visible artwork on the current page.
 
+Drag a selection box from empty canvas or Shift-click layers/objects to select several items. Drag any selected object to move the whole selection. The selection toolbar provides six alignment options and edge/centre snapping with visible guides; hold Alt while dragging to bypass snapping, or turn it off with **Snap on**.
+
+Use **Copy/Paste** or Cmd/Ctrl+C/V to copy selections between pages and projects. Pasted groups retain their children; private images can only be pasted within their original project. **Group** (Cmd/Ctrl+G) combines objects in the same frame; **Ungroup** (Cmd/Ctrl+Shift+G) releases them. Groups appear as collapsible containers in Layers and move their members together. Select a member in Layers to edit it individually. Right-click an object or selection for copy/paste, grouping, duplicate, rename, ordering, frame selection, visibility, locking, and deletion. Multi-object actions are saved and undone together.
+
 Use the panel icons at the top-left and top-right of the canvas to hide or show Layers and Properties independently. Cmd/Ctrl+Backslash toggles both panels. The canvas expands into the freed space and keeps its current centre and zoom. On narrow screens the same buttons open one sidebar as an overlay.
 
 ## Rust / WebAssembly
@@ -72,7 +76,7 @@ For the live authenticated multiplayer test, run `npm run test:multiplayer` with
 
 ## Prototype boundaries
 
-One Node process serializes room edits. Scale-out needs coordinated room ownership or a shared sync backend. Undo history is local to the current browser. Frames provide basic grouping and click-through navigation; nested frames, vector paths, auto-layout, and presentation links are not included. PNG export captures the current viewport. Password reset and social login are not yet included.
+One Node process serializes room edits. Scale-out needs coordinated room ownership or a shared sync backend. Undo history is local to the current browser. Frames provide click-through navigation, and groups support collective movement; resizing or rotating a whole group, nested frames, vector paths, auto-layout, and presentation links are not included. PNG export captures the current viewport. Social login is not yet included.
 
 For deployment, use a persistent Node host with WebSocket support and HTTPS; Vercel serverless alone cannot run this custom server. Include `public/wasm` when deploying static assets. Add per-user rate limits and production SMTP before a public launch.
 

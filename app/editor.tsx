@@ -52,6 +52,7 @@ import {
   getPageShapes,
   getPages,
   initialDocument,
+  validOperation,
   normalizeDocument,
   type Document,
   type Shape,
@@ -61,13 +62,29 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase, canEdit, type Role } from "../lib/supabase";
 import Sharing from "./sharing";
 import Brand from "./brand";
-import { containingFrameId, withAutomaticFrame } from "../lib/frames";
+import {
+  containingFrameId,
+  withAutomaticFrame,
+  frameLayerRows,
+} from "../lib/frames";
 import {
   fitViewport,
   javascriptGeometry,
   loadGeometryEngine,
   type GeometryEngine,
 } from "../lib/geometry";
+import {
+  ancestors,
+  roots,
+  expandSelection,
+  selectionTarget,
+  isHidden,
+  isLocked,
+  boxSelection,
+  alignmentPatches,
+  snapMove,
+  clipboardCopies,
+} from "../lib/selection";
 type Peer = {
   id: string;
   name: string;
@@ -203,7 +220,11 @@ function PrototypePreview({
   const x = (viewport.width - frame.width * scale) / 2;
   const y = (viewport.height - frame.height * scale) / 2 + 24;
   const visible = shapes.filter(
-    (s) => s.type !== "frame" && s.frameId === frame.id && !s.hidden,
+    (s) =>
+      s.type !== "frame" &&
+      s.type !== "group" &&
+      s.frameId === frame.id &&
+      !isHidden(s, shapes),
   );
   function navigate(s: Shape) {
     if (
@@ -315,7 +336,21 @@ export default function Editor({
   const [doc, setDoc] = useState<Document>(initialDocument()),
     [activePageId, setActivePageId] = useState("page-1"),
     [collapsedPages, setCollapsedPages] = useState<Record<string, boolean>>({}),
-    [selected, setSelected] = useState<string>(),
+    [collapsedFrames, setCollapsedFrames] = useState<Record<string, boolean>>(
+      {},
+    ),
+    [selected, setPrimarySelected] = useState<string>(),
+    [extraSelected, setExtraSelected] = useState<string[]>([]),
+    [marquee, setMarquee] = useState<{
+      start: { x: number; y: number };
+      end: { x: number; y: number };
+      additive: boolean;
+    } | null>(null),
+    [guides, setGuides] = useState<{ axis: "x" | "y"; value: number }[]>([]),
+    [snapEnabled, setSnapEnabled] = useState(true),
+    [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(
+      null,
+    ),
     [tool, setTool] = useState<Tool>("select"),
     [spacePanning, setSpacePanning] = useState(false),
     [canvasDragging, setCanvasDragging] = useState(false),
@@ -347,6 +382,12 @@ export default function Editor({
     container = useRef<HTMLDivElement>(null),
     canvasSize = useRef<{ width: number; height: number } | null>(null),
     imageInput = useRef<HTMLInputElement>(null),
+    dragSession = useRef<{
+      leader: Shape;
+      roots: Shape[];
+      dx: number;
+      dy: number;
+    } | null>(null),
     docRef = useRef(doc),
     selectionRef = useRef(selected),
     selfRef = useRef(""),
@@ -657,13 +698,23 @@ export default function Editor({
     };
   }, [roomId, session.user.id, session.access_token]);
   useEffect(() => {
-    const node = stage.current?.findOne("#" + selected);
+    const ids = [...(selected ? [selected] : []), ...extraSelected];
     transformer.current?.nodes(
-      node && editable && !activeShapes.find((s) => s.id === selected)?.locked
-        ? [node]
+      editable
+        ? ids
+            .filter((id) => {
+              const shape = activeShapes.find((s) => s.id === id);
+              return (
+                shape &&
+                !isLocked(shape, activeShapes) &&
+                !ancestors(shape, activeShapes).some((p) => ids.includes(p.id))
+              );
+            })
+            .map((id) => stage.current?.findOne("#" + id))
+            .filter((node): node is Konva.Node => !!node)
         : [],
     );
-  }, [selected, activeShapes, editable]);
+  }, [selected, extraSelected, activeShapes, editable]);
   useEffect(() => {
     if (
       role &&
@@ -677,6 +728,381 @@ export default function Editor({
       setPan(view.pan);
     }
   }, [size, role, activePage.id, activeShapes, geometry]);
+  const selectionIds = new Set([
+    ...(selected ? [selected] : []),
+    ...extraSelected,
+  ]);
+  function setSelected(id: string | undefined) {
+    setPrimarySelected(id);
+    setExtraSelected([]);
+  }
+  useEffect(() => {
+    const available = new Set(activeShapes.map((shape) => shape.id));
+    const ids = [...(selected ? [selected] : []), ...extraSelected];
+    if (ids.some((id) => !available.has(id))) {
+      const remaining = ids.filter((id) => available.has(id));
+      setPrimarySelected(remaining[0]);
+      setExtraSelected(remaining.slice(1));
+    }
+  }, [activeShapes, selected, extraSelected]);
+  useEffect(() => {
+    if (!marquee) return;
+    const cancel = (event: MouseEvent) => {
+      if (
+        !(event.target instanceof Element) ||
+        !container.current?.contains(event.target)
+      )
+        setMarquee(null);
+    };
+    window.addEventListener("mouseup", cancel);
+    return () => window.removeEventListener("mouseup", cancel);
+  }, [marquee]);
+  function selectIds(ids: string[]) {
+    setPrimarySelected(ids[0]);
+    setExtraSelected(ids.slice(1));
+  }
+  function commitMany(operations: Operation[]) {
+    if (operations.length) commit({ kind: "batch", operations });
+  }
+  function copySelection() {
+    const shapes = expandSelection(activeShapes, selectionIds);
+    if (!shapes.length) return;
+    const text = JSON.stringify({
+      format: "apnadesign-selection-v1",
+      project: roomId,
+      shapes,
+    });
+    localStorage.setItem("apnadesign-clipboard", text);
+    void navigator.clipboard?.writeText(text).catch(() => {});
+    setNotice(`Copied ${shapes.length} objects. Paste on any page.`);
+  }
+  function pasteSelection(text?: string) {
+    if (!editable) return;
+    try {
+      const payload = JSON.parse(
+        text || localStorage.getItem("apnadesign-clipboard") || "null",
+      );
+      if (
+        payload?.format !== "apnadesign-selection-v1" ||
+        !Array.isArray(payload.shapes) ||
+        payload.shapes.length > 200 ||
+        !payload.shapes.every((shape: unknown) =>
+          validOperation({ kind: "add", shape }),
+        )
+      ) {
+        setNotice("Copy objects from ApnaDesign first.");
+        return;
+      }
+      const copies = clipboardCopies(
+        payload.shapes,
+        String(payload.project),
+        roomId,
+      );
+      const bounds = geometry.bounds(copies);
+      if (bounds) {
+        const dx =
+          (size.width / 2 - pan.x) / zoom - (bounds.x + bounds.width / 2);
+        const dy =
+          (size.height / 2 - pan.y) / zoom - (bounds.y + bounds.height / 2);
+        copies.forEach((shape) => {
+          shape.x += dx;
+          shape.y += dy;
+        });
+      }
+      const operations: Operation[] = copies.map((shape) => ({
+        kind: "add",
+        shape: shape.frameId
+          ? shape
+          : {
+              ...shape,
+              frameId: containingFrameId(shape, [...activeShapes, ...copies]),
+            },
+      }));
+      commitMany(operations);
+      selectIds(
+        roots(
+          copies,
+          copies.map((s) => s.id),
+        ).map((s) => s.id),
+      );
+      setNotice(
+        copies.length < payload.shapes.length
+          ? "Pasted objects. Images can only be pasted within their original project."
+          : "Pasted selection.",
+      );
+    } catch {
+      setNotice("Clipboard does not contain an ApnaDesign selection.");
+    }
+  }
+  function alignSelection(align: string) {
+    commitMany(
+      alignmentPatches(activeShapes, selectionIds, align).map(
+        ({ id, patch }) => ({ kind: "patch", id, patch }),
+      ),
+    );
+  }
+  function beginMove(shape: Shape) {
+    const target = selectionIds.has(shape.id)
+      ? shape.id
+      : ancestors(shape, activeShapes).find(
+          (parent) => parent.type === "group" && selectionIds.has(parent.id),
+        )?.id || selectionTarget(shape, activeShapes);
+    const ids = selectionIds.has(target) ? [...selectionIds] : [target];
+    if (!selectionIds.has(target)) selectIds(ids);
+    dragSession.current = {
+      leader: { ...shape },
+      roots: roots(activeShapes, ids).filter((s) => !isLocked(s, activeShapes)),
+      dx: 0,
+      dy: 0,
+    };
+  }
+  function dragMove(shape: Shape, node: Konva.Node, alt = false) {
+    const drag = dragSession.current;
+    if (!drag) return;
+    let dx =
+      node.x() -
+      (shape.type === "ellipse" ? shape.width / 2 : 0) -
+      drag.leader.x;
+    let dy =
+      node.y() -
+      (shape.type === "ellipse" ? shape.height / 2 : 0) -
+      drag.leader.y;
+    const snapped =
+      snapEnabled && !alt
+        ? snapMove(
+            activeShapes,
+            drag.roots.map((s) => s.id),
+            dx,
+            dy,
+            6 / zoom,
+          )
+        : { dx, dy, guides: [] };
+    drag.dx = snapped.dx;
+    drag.dy = snapped.dy;
+    setGuides(snapped.guides);
+    node.position({
+      x:
+        drag.leader.x +
+        drag.dx +
+        (shape.type === "ellipse" ? shape.width / 2 : 0),
+      y:
+        drag.leader.y +
+        drag.dy +
+        (shape.type === "ellipse" ? shape.height / 2 : 0),
+    });
+    const positions = Object.fromEntries(
+      drag.roots.map((s) => [
+        s.id,
+        { x: s.x + drag.dx, y: s.y + drag.dy, peerId: "local" },
+      ]),
+    );
+    setPreviews((current) => ({ ...current, ...positions }));
+    drag.roots.forEach((s) => previewDrag(s.id, s.x + drag.dx, s.y + drag.dy));
+  }
+  function finishMove() {
+    const drag = dragSession.current;
+    dragSession.current = null;
+    setGuides([]);
+    if (!drag) return;
+    commitMany(
+      drag.roots.map((s) => ({
+        kind: "patch",
+        id: s.id,
+        patch: { x: s.x + drag.dx, y: s.y + drag.dy },
+      })),
+    );
+  }
+  function selectItem(id: string, additive = false) {
+    setContextMenu(null);
+    if (!additive) {
+      setSelected(id);
+      return;
+    }
+    const ids = Array.from(selectionIds);
+    const next = ids.includes(id)
+      ? ids.filter((value) => value !== id)
+      : [...ids, id];
+    setPrimarySelected(next[0]);
+    setExtraSelected(next.slice(1));
+  }
+  function openContext(id: string, x: number, y: number) {
+    if (!selectionIds.has(id)) setSelected(id);
+    setContextMenu({
+      x: Math.max(8, Math.min(x, window.innerWidth - 225)),
+      y: Math.max(8, Math.min(y, window.innerHeight - 520)),
+    });
+  }
+  function menuAction(action: string) {
+    const shapes = getPageShapes(docRef.current, activePage.id);
+    const targets = roots(shapes, selectionIds);
+    setContextMenu(null);
+    if (action === "copy") {
+      copySelection();
+      return;
+    }
+    if (action === "paste") {
+      pasteSelection();
+      return;
+    }
+    if (!editable || !targets.length) return;
+    if (action === "group") {
+      if (
+        targets.length < 2 ||
+        targets.some((s) => s.type === "frame" || isLocked(s, shapes)) ||
+        new Set(targets.map((s) => s.frameId || "")).size !== 1
+      ) {
+        setNotice(
+          "Select at least two unlocked objects in the same frame to group.",
+        );
+        return;
+      }
+      const b = geometry.bounds(targets);
+      if (!b) return;
+      const group: Shape = {
+        ...b,
+        id: "s" + crypto.randomUUID().replaceAll("-", ""),
+        type: "group",
+        name: "Group",
+        fill: "transparent",
+        rotation: 0,
+        frameId: targets[0].frameId,
+        groupId: targets.every((s) => s.groupId === targets[0].groupId)
+          ? targets[0].groupId
+          : "",
+      };
+      commitMany([
+        { kind: "add", shape: group },
+        ...targets.map((s) => ({
+          kind: "patch" as const,
+          id: s.id,
+          patch: { groupId: group.id },
+        })),
+      ]);
+      setSelected(group.id);
+      return;
+    }
+    if (action === "ungroup") {
+      const groups = targets.filter(
+        (s) => s.type === "group" && !isLocked(s, shapes),
+      );
+      const children = shapes.filter((s) =>
+        groups.some((g) => s.groupId === g.id),
+      );
+      commitMany([
+        ...children.map((s) => ({
+          kind: "patch" as const,
+          id: s.id,
+          patch: {
+            groupId: groups.find((g) => g.id === s.groupId)?.groupId || "",
+          },
+        })),
+        ...groups.map((g) => ({ kind: "delete" as const, id: g.id })),
+      ]);
+      selectIds(children.map((s) => s.id));
+      return;
+    }
+    if (action === "rename") {
+      const name = window.prompt("Object name", targets[0].name)?.trim();
+      if (name)
+        commit({
+          kind: "patch",
+          id: targets[0].id,
+          patch: { name: name.slice(0, 120) },
+        });
+      return;
+    }
+    if (action === "frame") {
+      const bounds = geometry.bounds(targets);
+      if (!bounds || targets.some((s) => s.type === "frame" || s.locked))
+        return;
+      const frame: Shape = {
+        id: "s" + crypto.randomUUID().replaceAll("-", ""),
+        type: "frame",
+        name: "Selection frame",
+        x: bounds.x - 20,
+        y: bounds.y - 20,
+        width: bounds.width + 40,
+        height: bounds.height + 40,
+        rotation: 0,
+        fill: "#ffffff",
+      };
+      commitMany([
+        { kind: "add", shape: frame },
+        ...expandSelection(
+          shapes,
+          targets.map((s) => s.id),
+        ).map((s) => ({
+          kind: "patch" as const,
+          id: s.id,
+          patch: {
+            frameId: frame.id,
+            ...(targets.some((t) => t.id === s.id) ? { groupId: "" } : {}),
+          },
+        })),
+      ]);
+      setSelected(frame.id);
+      return;
+    }
+    if (action === "duplicate") {
+      const expanded = expandSelection(shapes, selectionIds);
+      const copies = clipboardCopies(expanded, roomId, roomId);
+      // Keep outside parent links when duplicating individual members.
+      copies.forEach((s, index) => {
+        s.frameId ||= expanded[index].frameId || "";
+        s.groupId ||= expanded[index].groupId || "";
+      });
+      commitMany(copies.map((shape) => ({ kind: "add", shape })));
+      selectIds(
+        roots(
+          copies,
+          copies.map((s) => s.id),
+        ).map((s) => s.id),
+      );
+      return;
+    }
+    if (action === "delete") {
+      const expanded = expandSelection(shapes, selectionIds).filter(
+        (s) => !isLocked(s, shapes),
+      );
+      commitMany(expanded.map((s) => ({ kind: "delete", id: s.id })));
+      setSelected(undefined);
+      return;
+    }
+    if (action === "front" || action === "back") {
+      const ordered = action === "front" ? targets : [...targets].reverse();
+      ordered.forEach((s) => {
+        const current = getPageShapes(docRef.current, activePage.id);
+        const index = current.findIndex((t) => t.id === s.id);
+        const count = action === "front" ? current.length - 1 - index : index;
+        if (s.locked) return;
+        for (let i = 0; i < count; i++)
+          commit({
+            kind: "order",
+            id: s.id,
+            direction: action === "front" ? 1 : -1,
+          });
+      });
+      return;
+    }
+    const all = targets.every((s) => (action === "lock" ? s.locked : s.hidden));
+    commitMany(
+      targets
+        .filter((s) => action === "lock" || !isLocked(s, shapes))
+        .map((s) => ({
+          kind: "patch",
+          id: s.id,
+          patch: action === "lock" ? { locked: !all } : { hidden: !all },
+        })),
+    );
+  }
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setContextMenu(null);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [contextMenu]);
   const selectedShape = activeShapes.find((s) => s.id === selected);
   function presence(x?: number, y?: number) {
     if (ws.current?.readyState === WebSocket.OPEN)
@@ -693,8 +1119,17 @@ export default function Editor({
   useEffect(() => {
     presence();
   }, [selected]);
-  function inverse(op: Operation): Operation | undefined {
-    const d = docRef.current;
+  function inverse(op: Operation, d = docRef.current): Operation | undefined {
+    if (op.kind === "batch") {
+      let current = d;
+      const operations: Operation[] = [];
+      for (const child of op.operations) {
+        const inv = inverse(child, current);
+        if (inv) operations.unshift(inv);
+        current = apply(current, child);
+      }
+      return operations.length ? { kind: "batch", operations } : undefined;
+    }
     const pageId = "pageId" in op ? op.pageId : undefined;
     const shapes = getPageShapes(d, pageId);
     if (op.kind === "add")
@@ -713,7 +1148,15 @@ export default function Editor({
       if (!s) return;
       const patch: Partial<Shape> = {};
       for (const key of Object.keys(op.patch) as (keyof Shape)[])
-        Object.assign(patch, { [key]: s[key] });
+        Object.assign(patch, {
+          [key]:
+            s[key] ??
+            (typeof op.patch[key] === "boolean"
+              ? false
+              : typeof op.patch[key] === "number"
+                ? 24
+                : ""),
+        });
       return {
         kind: "patch_if",
         id: op.id,
@@ -749,6 +1192,17 @@ export default function Editor({
       };
   }
   function guardedForReplay(op: Operation, before: Document): Operation {
+    if (op.kind === "batch") {
+      let current = before;
+      return {
+        kind: "batch",
+        operations: op.operations.map((child) => {
+          const result = guardedForReplay(child, current);
+          current = apply(current, child);
+          return result;
+        }),
+      };
+    }
     if (op.kind === "page_add") return op;
     const pageId = "pageId" in op ? op.pageId : undefined;
     const shapes = getPageShapes(before, pageId);
@@ -757,7 +1211,15 @@ export default function Editor({
       if (!shape) return op;
       const expected: Partial<Shape> = {};
       for (const key of Object.keys(op.patch) as (keyof Shape)[])
-        Object.assign(expected, { [key]: shape[key] });
+        Object.assign(expected, {
+          [key]:
+            shape[key] ??
+            (typeof op.patch[key] === "boolean"
+              ? false
+              : typeof op.patch[key] === "number"
+                ? 24
+                : ""),
+        });
       return {
         kind: "patch_if",
         id: op.id,
@@ -800,23 +1262,46 @@ export default function Editor({
       setNotice("You have view-only access to this design.");
       return;
     }
-    if (op.kind === "patch") {
-      const shapes = getPageShapes(docRef.current, op.pageId || activePage.id);
-      const id = op.id;
-      const shape = shapes.find((s) => s.id === id);
-      if (shape)
-        op = { ...op, patch: withAutomaticFrame(shape, op.patch, shapes) };
+    function prepare(operation: Operation, before: Document): Operation {
+      if (operation.kind === "batch") {
+        let current = before;
+        return {
+          kind: "batch",
+          operations: operation.operations.map((child) => {
+            const result = prepare(child, current);
+            current = apply(current, result);
+            return result;
+          }),
+        };
+      }
+      if (operation.kind === "patch") {
+        const shapes = getPageShapes(before, operation.pageId || activePage.id);
+        const id = operation.id;
+        const shape = shapes.find((s) => s.id === id);
+        if (shape)
+          operation = {
+            ...operation,
+            patch: withAutomaticFrame(shape, operation.patch, shapes),
+          };
+      }
+      return "pageId" in operation ||
+        [
+          "add",
+          "patch",
+          "patch_if",
+          "delete",
+          "delete_if",
+          "order",
+          "order_if",
+        ].includes(operation.kind)
+        ? ({
+            ...operation,
+            pageId:
+              ("pageId" in operation && operation.pageId) || activePage.id,
+          } as Operation)
+        : operation;
     }
-    const scopedOp =
-      op.kind === "add" ||
-      op.kind === "patch" ||
-      op.kind === "patch_if" ||
-      op.kind === "delete" ||
-      op.kind === "delete_if" ||
-      op.kind === "order" ||
-      op.kind === "order_if"
-        ? { ...op, pageId: op.pageId || activePage.id }
-        : op;
+    const scopedOp = prepare(op, docRef.current);
     if (record) {
       const inv = inverse(scopedOp);
       if (inv) undo.current.push(inv);
@@ -824,11 +1309,23 @@ export default function Editor({
       setHistoryVersion((v) => v + 1);
     }
     const before = docRef.current;
+    const modified =
+      scopedOp.kind === "batch" ? scopedOp.operations : [scopedOp];
+    setPreviews((current) => {
+      const next = { ...current };
+      for (const child of modified) if ("id" in child) delete next[child.id];
+      return next;
+    });
     enqueue(scopedOp, before);
     setDoc((d) => apply(d, scopedOp));
     docRef.current = apply(docRef.current, scopedOp);
   }
   function previewDrag(id: string, x: number, y: number) {
+    if (activeShapes.find((s) => s.id === id)?.type === "frame")
+      setPreviews((current) => ({
+        ...current,
+        [id]: { x, y, peerId: "local" },
+      }));
     const socket = ws.current;
     if (socket?.readyState !== WebSocket.OPEN) return;
     const now = Date.now();
@@ -975,25 +1472,10 @@ export default function Editor({
     }
   }
   function duplicate() {
-    if (!editable) return;
-    if (selectedShape) {
-      const shape = {
-        ...selectedShape,
-        id: "s" + crypto.randomUUID().replaceAll("-", ""),
-        x: selectedShape.x + 24,
-        y: selectedShape.y + 24,
-        name: selectedShape.name + " copy",
-      };
-      commit({ kind: "add", shape });
-      setSelected(shape.id);
-    }
+    menuAction("duplicate");
   }
   function remove() {
-    if (!editable) return;
-    if (selected) {
-      commit({ kind: "delete", id: selected });
-      setSelected(undefined);
-    }
+    menuAction("delete");
   }
   function fit() {
     const view = fitViewport(geometry.bounds(activeShapes), size);
@@ -1012,10 +1494,25 @@ export default function Editor({
       if (
         target instanceof Element &&
         target.closest(
-          'input,textarea,select,button,[contenteditable="true"],[role="textbox"]',
+          'input,textarea,select,[contenteditable="true"],[role="textbox"]',
         )
       )
         return;
+      if (mod && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        copySelection();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        pasteSelection();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        menuAction(e.shiftKey ? "ungroup" : "group");
+        return;
+      }
       if (e.code === "Space") {
         e.preventDefault();
         setSpacePanning(true);
@@ -1049,10 +1546,12 @@ export default function Editor({
       )
         setTool(tools[e.key.toLowerCase()]);
       if (e.key === "Escape") {
+        setMarquee(null);
+        setGuides([]);
         setSelected(undefined);
         setTool("select");
       }
-      if (e.key === "1" && e.shiftKey) fit();
+      if (e.code === "Digit1" && e.shiftKey) fit();
     }
     function releaseSpace(e: KeyboardEvent) {
       if (e.code === "Space") setSpacePanning(false);
@@ -1069,7 +1568,17 @@ export default function Editor({
       window.removeEventListener("keyup", releaseSpace);
       window.removeEventListener("blur", releaseOnBlur);
     };
-  }, [selectedShape, size, editable, activeShapes, geometry, compact]);
+  }, [
+    selectedShape,
+    extraSelected,
+    size,
+    editable,
+    activeShapes,
+    geometry,
+    compact,
+    pan,
+    zoom,
+  ]);
   function exportPng() {
     transformer.current?.hide();
     const url = stage.current?.toDataURL({ pixelRatio: 2 });
@@ -1099,6 +1608,85 @@ export default function Editor({
         }
         data-history={historyVersion}
       >
+        {contextMenu && (
+          <>
+            <div
+              className="context-menu-backdrop"
+              onPointerDown={() => setContextMenu(null)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu(null);
+              }}
+            />
+            <div
+              className="object-context-menu"
+              role="menu"
+              aria-label="Object actions"
+              style={{ left: contextMenu.x, top: contextMenu.y }}
+            >
+              <span className="context-menu-caption">
+                {selectionIds.size} selected
+              </span>
+              {[
+                ["copy", "Copy"],
+                ["paste", "Paste"],
+                ["duplicate", "Duplicate"],
+                ["group", "Group selection"],
+                ["ungroup", "Ungroup"],
+                ["rename", "Rename"],
+                ["front", "Bring to front"],
+                ["back", "Send to back"],
+                ["frame", "Frame selection"],
+                [
+                  "hide",
+                  activeShapes
+                    .filter((s) => selectionIds.has(s.id))
+                    .every((s) => s.hidden)
+                    ? "Show"
+                    : "Hide",
+                ],
+                [
+                  "lock",
+                  activeShapes
+                    .filter((s) => selectionIds.has(s.id))
+                    .every((s) => s.locked)
+                    ? "Unlock"
+                    : "Lock",
+                ],
+                ["delete", "Delete"],
+              ].map(([action, label]) => (
+                <button
+                  key={action}
+                  role="menuitem"
+                  disabled={
+                    (action !== "copy" && !editable) ||
+                    (action === "group" &&
+                      (selectionIds.size < 2 ||
+                        activeShapes.some(
+                          (s) =>
+                            selectionIds.has(s.id) &&
+                            (s.type === "frame" || isLocked(s, activeShapes)),
+                        ))) ||
+                    (action === "ungroup" &&
+                      !activeShapes.some(
+                        (s) => selectionIds.has(s.id) && s.type === "group",
+                      )) ||
+                    (action === "rename" && selectionIds.size !== 1) ||
+                    (action === "frame" &&
+                      activeShapes.some(
+                        (s) =>
+                          selectionIds.has(s.id) &&
+                          (s.type === "frame" || s.locked),
+                      ))
+                  }
+                  onClick={() => menuAction(action)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         <header className="topbar">
           <Brand />
           <div className="document-title">
@@ -1231,62 +1819,98 @@ export default function Editor({
           </div>
           {!collapsedPages[activePage.id] && (
             <div className="layers">
-              {[...activeShapes].reverse().map((s) => (
-                <div
-                  className={
-                    "layer-row " +
-                    (selected === s.id ? "selected" : "") +
-                    (s.hidden ? " muted" : "")
-                  }
-                  key={s.id}
-                >
-                  <button
-                    className="layer-select"
-                    onClick={() => setSelected(s.id)}
+              {frameLayerRows(activeShapes)
+                .filter(
+                  ({ ancestors: path }) =>
+                    !path.some(
+                      (id) => collapsedFrames[`${activePage.id}:${id}`],
+                    ),
+                )
+                .map(({ shape: s, depth }) => (
+                  <div
+                    className={
+                      "layer-row " +
+                      (selectionIds.has(s.id) ? "selected" : "") +
+                      (s.hidden ? " muted" : "")
+                    }
+                    key={s.id}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      openContext(s.id, e.clientX, e.clientY);
+                    }}
+                    style={{ paddingLeft: depth ? depth * 18 + 6 : undefined }}
                   >
-                    {s.type === "text" ? (
-                      <Type size={14} />
-                    ) : s.type === "image" ? (
-                      <ImagePlus size={14} />
-                    ) : s.type === "frame" ? (
-                      <PanelsTopLeft size={14} />
-                    ) : s.type === "ellipse" ? (
-                      <Circle size={14} />
-                    ) : (
-                      <Square size={14} />
+                    {(s.type === "frame" || s.type === "group") && (
+                      <button
+                        className="frame-collapse"
+                        aria-label={`${collapsedFrames[`${activePage.id}:${s.id}`] ? "Expand" : "Collapse"} ${s.type} ${s.name}`}
+                        aria-expanded={
+                          !collapsedFrames[`${activePage.id}:${s.id}`]
+                        }
+                        onClick={() =>
+                          setCollapsedFrames((current) => ({
+                            ...current,
+                            [`${activePage.id}:${s.id}`]:
+                              !current[`${activePage.id}:${s.id}`],
+                          }))
+                        }
+                      >
+                        {collapsedFrames[`${activePage.id}:${s.id}`] ? (
+                          <ChevronRight size={13} />
+                        ) : (
+                          <ChevronDown size={13} />
+                        )}
+                      </button>
                     )}
-                    <span>{s.name}</span>
-                  </button>
-                  <button
-                    className="layer-action"
-                    disabled={!editable}
-                    aria-label={`${s.hidden ? "Show" : "Hide"} ${s.name}`}
-                    onClick={() =>
-                      commit({
-                        kind: "patch",
-                        id: s.id,
-                        patch: { hidden: !s.hidden },
-                      })
-                    }
-                  >
-                    {s.hidden ? <EyeOff size={12} /> : <Eye size={12} />}
-                  </button>
-                  <button
-                    className="layer-action"
-                    disabled={!editable}
-                    aria-label={`${s.locked ? "Unlock" : "Lock"} ${s.name}`}
-                    onClick={() =>
-                      commit({
-                        kind: "patch",
-                        id: s.id,
-                        patch: { locked: !s.locked },
-                      })
-                    }
-                  >
-                    {s.locked ? <Lock size={12} /> : <Unlock size={12} />}
-                  </button>
-                </div>
-              ))}
+                    <button
+                      className="layer-select"
+                      onClick={(e) => selectItem(s.id, e.shiftKey)}
+                    >
+                      {s.type === "text" ? (
+                        <Type size={14} />
+                      ) : s.type === "image" ? (
+                        <ImagePlus size={14} />
+                      ) : s.type === "group" ? (
+                        <Layers size={14} />
+                      ) : s.type === "frame" ? (
+                        <PanelsTopLeft size={14} />
+                      ) : s.type === "ellipse" ? (
+                        <Circle size={14} />
+                      ) : (
+                        <Square size={14} />
+                      )}
+                      <span>{s.name}</span>
+                    </button>
+                    <button
+                      className="layer-action"
+                      disabled={!editable}
+                      aria-label={`${s.hidden ? "Show" : "Hide"} ${s.name}`}
+                      onClick={() =>
+                        commit({
+                          kind: "patch",
+                          id: s.id,
+                          patch: { hidden: !s.hidden },
+                        })
+                      }
+                    >
+                      {s.hidden ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
+                    <button
+                      className="layer-action"
+                      disabled={!editable}
+                      aria-label={`${s.locked ? "Unlock" : "Lock"} ${s.name}`}
+                      onClick={() =>
+                        commit({
+                          kind: "patch",
+                          id: s.id,
+                          patch: { locked: !s.locked },
+                        })
+                      }
+                    >
+                      {s.locked ? <Lock size={12} /> : <Unlock size={12} />}
+                    </button>
+                  </div>
+                ))}
             </div>
           )}
           <div className="sidebar-bottom">
@@ -1342,6 +1966,72 @@ export default function Editor({
             <span className="green-dot" /> DESIGN CANVAS{" "}
             <span>Room / {room}</span>
           </div>
+          <div className="selection-tools" aria-label="Selection tools">
+            <span>
+              {selectionIds.size
+                ? `${selectionIds.size} selected`
+                : "Shift-click or drag to select"}
+            </span>
+            <button
+              aria-label="Copy selection"
+              disabled={!selectionIds.size}
+              onClick={copySelection}
+            >
+              Copy
+            </button>
+            <button
+              aria-label="Paste selection"
+              disabled={!editable}
+              onClick={() => pasteSelection()}
+            >
+              Paste
+            </button>
+            <button
+              aria-label="Group selection"
+              disabled={!editable || selectionIds.size < 2}
+              onClick={() => menuAction("group")}
+            >
+              Group
+            </button>
+            <button
+              aria-label="Ungroup selection"
+              disabled={
+                !editable ||
+                !activeShapes.some(
+                  (s) => selectionIds.has(s.id) && s.type === "group",
+                )
+              }
+              onClick={() => menuAction("ungroup")}
+            >
+              Ungroup
+            </button>
+            <button
+              aria-label="Toggle snapping"
+              aria-pressed={snapEnabled}
+              onClick={() => setSnapEnabled((v) => !v)}
+            >
+              Snap {snapEnabled ? "on" : "off"}
+            </button>
+          </div>
+          {selectionIds.size > 1 && (
+            <div
+              className="selection-alignment"
+              aria-label="Align selected objects"
+            >
+              {["left", "center", "right", "top", "middle", "bottom"].map(
+                (align) => (
+                  <button
+                    key={align}
+                    aria-label={`Align selection ${align}`}
+                    disabled={!editable}
+                    onClick={() => alignSelection(align)}
+                  >
+                    {align}
+                  </button>
+                ),
+              )}
+            </div>
+          )}
           <Stage
             ref={stage}
             width={size.width}
@@ -1384,12 +2074,45 @@ export default function Editor({
                 }));
             }}
             onMouseMove={() => {
+              if (marquee) {
+                const p = stage.current?.getPointerPosition();
+                if (p)
+                  setMarquee((current) =>
+                    current
+                      ? {
+                          ...current,
+                          end: {
+                            x: (p.x - pan.x) / zoom,
+                            y: (p.y - pan.y) / zoom,
+                          },
+                        }
+                      : null,
+                  );
+              }
               if (Date.now() - lastPresence.current < 50) return;
               lastPresence.current = Date.now();
               const p = stage.current?.getPointerPosition();
               if (p) presence((p.x - pan.x) / zoom, (p.y - pan.y) / zoom);
             }}
+            onMouseUp={() => {
+              if (!marquee) return;
+              const box = {
+                x: Math.min(marquee.start.x, marquee.end.x),
+                y: Math.min(marquee.start.y, marquee.end.y),
+                width: Math.abs(marquee.end.x - marquee.start.x),
+                height: Math.abs(marquee.end.y - marquee.start.y),
+              };
+              const ids = boxSelection(activeShapes, box);
+              selectIds([
+                ...new Set([
+                  ...(marquee.additive ? [...selectionIds] : []),
+                  ...ids,
+                ]),
+              ]);
+              setMarquee(null);
+            }}
             onMouseDown={(e) => {
+              if (e.evt.button !== 0) return;
               if (e.target === stage.current) {
                 if (tool === "hand" || spacePanning || canvasDragging) return;
                 if (
@@ -1400,18 +2123,45 @@ export default function Editor({
                 ) {
                   const p = stage.current!.getPointerPosition()!;
                   add(tool, (p.x - pan.x) / zoom, (p.y - pan.y) / zoom);
-                } else setSelected(undefined);
+                } else {
+                  const p = stage.current!.getPointerPosition()!;
+                  const point = {
+                    x: (p.x - pan.x) / zoom,
+                    y: (p.y - pan.y) / zoom,
+                  };
+                  setMarquee({
+                    start: point,
+                    end: point,
+                    additive: e.evt.shiftKey,
+                  });
+                  if (!e.evt.shiftKey) setSelected(undefined);
+                }
               }
             }}
           >
             <Layer>
               {activeShapes
-                .filter((s) => !s.hidden)
+                .filter((s) => !isHidden(s, activeShapes))
                 .map((s) => {
+                  const ancestorPreview = ancestors(s, activeShapes).find(
+                    (p) => previews[p.id],
+                  );
+                  const displayX =
+                    previews[s.id]?.x ??
+                    s.x +
+                      (ancestorPreview
+                        ? previews[ancestorPreview.id].x - ancestorPreview.x
+                        : 0);
+                  const displayY =
+                    previews[s.id]?.y ??
+                    s.y +
+                      (ancestorPreview
+                        ? previews[ancestorPreview.id].y - ancestorPreview.y
+                        : 0);
                   const common = {
                     id: s.id,
-                    x: previews[s.id]?.x ?? s.x,
-                    y: previews[s.id]?.y ?? s.y,
+                    x: displayX,
+                    y: displayY,
                     width: s.width,
                     height: s.height,
                     fill: s.fill,
@@ -1421,20 +2171,33 @@ export default function Editor({
                       tool === "select" &&
                       !spacePanning &&
                       !canvasDragging &&
-                      !s.locked,
-                    onClick: () =>
-                      tool === "select" && !spacePanning && setSelected(s.id),
+                      s.type !== "group" &&
+                      !isLocked(s, activeShapes),
+                    onClick: (e: Konva.KonvaEventObject<MouseEvent>) =>
+                      tool === "select" &&
+                      !spacePanning &&
+                      selectItem(
+                        e.evt.altKey ? s.id : selectionTarget(s, activeShapes),
+                        e.evt.shiftKey,
+                      ),
+                    onContextMenu: (
+                      e: Konva.KonvaEventObject<PointerEvent>,
+                    ) => {
+                      e.evt.preventDefault();
+                      openContext(
+                        selectionTarget(s, activeShapes),
+                        e.evt.clientX,
+                        e.evt.clientY,
+                      );
+                    },
                     onTap: () =>
-                      tool === "select" && !spacePanning && setSelected(s.id),
-                    onDragStart: () => setSelected(s.id),
+                      tool === "select" &&
+                      !spacePanning &&
+                      setSelected(selectionTarget(s, activeShapes)),
+                    onDragStart: () => beginMove(s),
                     onDragMove: (e: Konva.KonvaEventObject<DragEvent>) =>
-                      previewDrag(s.id, e.target.x(), e.target.y()),
-                    onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) =>
-                      commit({
-                        kind: "patch",
-                        id: s.id,
-                        patch: { x: e.target.x(), y: e.target.y() },
-                      }),
+                      dragMove(s, e.target, e.evt.altKey),
+                    onDragEnd: () => finishMove(),
                     onTransformEnd: (e: Konva.KonvaEventObject<Event>) => {
                       const n = e.target,
                         patch = {
@@ -1449,12 +2212,24 @@ export default function Editor({
                       commit({ kind: "patch", id: s.id, patch });
                     },
                   };
-                  return s.type === "rect" || s.type === "frame" ? (
+                  return s.type === "rect" ||
+                    s.type === "frame" ||
+                    s.type === "group" ? (
                     <Rect
                       key={s.id}
                       {...common}
-                      stroke={s.type === "frame" ? "#cbd0d9" : undefined}
-                      strokeWidth={s.type === "frame" ? 1 / zoom : 0}
+                      listening={s.type !== "group"}
+                      fill={s.type === "group" ? "transparent" : s.fill}
+                      stroke={
+                        s.type === "frame"
+                          ? "#cbd0d9"
+                          : s.type === "group" && selectionIds.has(s.id)
+                            ? "#8064ec"
+                            : undefined
+                      }
+                      strokeWidth={
+                        s.type === "frame" || s.type === "group" ? 1 / zoom : 0
+                      }
                       dash={
                         s.type === "frame" ? [5 / zoom, 4 / zoom] : undefined
                       }
@@ -1464,27 +2239,12 @@ export default function Editor({
                     <Ellipse
                       key={s.id}
                       {...common}
-                      x={(previews[s.id]?.x ?? s.x) + s.width / 2}
-                      y={(previews[s.id]?.y ?? s.y) + s.height / 2}
+                      x={displayX + s.width / 2}
+                      y={displayY + s.height / 2}
                       radiusX={s.width / 2}
                       radiusY={s.height / 2}
-                      onDragMove={(e) =>
-                        previewDrag(
-                          s.id,
-                          e.target.x() - s.width / 2,
-                          e.target.y() - s.height / 2,
-                        )
-                      }
-                      onDragEnd={(e) =>
-                        commit({
-                          kind: "patch",
-                          id: s.id,
-                          patch: {
-                            x: e.target.x() - s.width / 2,
-                            y: e.target.y() - s.height / 2,
-                          },
-                        })
-                      }
+                      onDragMove={(e) => dragMove(s, e.target, e.evt.altKey)}
+                      onDragEnd={() => finishMove()}
                       onTransformEnd={(e) => {
                         const n = e.target,
                           w = s.width * n.scaleX(),
@@ -1536,9 +2296,52 @@ export default function Editor({
                     />
                   );
                 })}
+              {marquee && (
+                <Rect
+                  x={Math.min(marquee.start.x, marquee.end.x)}
+                  y={Math.min(marquee.start.y, marquee.end.y)}
+                  width={Math.abs(marquee.end.x - marquee.start.x)}
+                  height={Math.abs(marquee.end.y - marquee.start.y)}
+                  fill="#8064ec18"
+                  stroke="#8064ec"
+                  strokeWidth={1 / zoom}
+                  listening={false}
+                />
+              )}
+              {guides.map((guide, index) => (
+                <Line
+                  key={index}
+                  points={
+                    guide.axis === "x"
+                      ? [
+                          guide.value,
+                          -pan.y / zoom,
+                          guide.value,
+                          (size.height - pan.y) / zoom,
+                        ]
+                      : [
+                          -pan.x / zoom,
+                          guide.value,
+                          (size.width - pan.x) / zoom,
+                          guide.value,
+                        ]
+                  }
+                  stroke="#e861ae"
+                  strokeWidth={1 / zoom}
+                  dash={[4 / zoom, 4 / zoom]}
+                  listening={false}
+                />
+              ))}
               <Transformer
                 ref={transformer}
-                rotateEnabled
+                rotateEnabled={
+                  selectionIds.size === 1 &&
+                  selectedShape?.type !== "group" &&
+                  selectedShape?.type !== "frame"
+                }
+                resizeEnabled={
+                  selectionIds.size === 1 && selectedShape?.type !== "group"
+                }
                 flipEnabled={false}
                 borderStroke="#8064ec"
                 anchorStroke="#8064ec"
@@ -1707,24 +2510,28 @@ export default function Editor({
                         ))}
                     </select>
                   </label>
-                  <label className="full-input">
-                    On click, go to
-                    <select
-                      disabled={!editable}
-                      aria-label="Prototype destination"
-                      value={selectedShape.targetFrameId || ""}
-                      onChange={(e) => patch({ targetFrameId: e.target.value })}
-                    >
-                      <option value="">No interaction</option>
-                      {activeShapes
-                        .filter((s) => s.type === "frame")
-                        .map((frame) => (
-                          <option key={frame.id} value={frame.id}>
-                            {frame.name}
-                          </option>
-                        ))}
-                    </select>
-                  </label>
+                  {selectedShape.type !== "group" && (
+                    <label className="full-input">
+                      On click, go to
+                      <select
+                        disabled={!editable}
+                        aria-label="Prototype destination"
+                        value={selectedShape.targetFrameId || ""}
+                        onChange={(e) =>
+                          patch({ targetFrameId: e.target.value })
+                        }
+                      >
+                        <option value="">No interaction</option>
+                        {activeShapes
+                          .filter((s) => s.type === "frame")
+                          .map((frame) => (
+                            <option key={frame.id} value={frame.id}>
+                              {frame.name}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                  )}
                 </div>
               )}
               <div className="property-section">
@@ -1758,7 +2565,11 @@ export default function Editor({
                           }
                         </span>
                         <input
-                          disabled={!editable}
+                          disabled={
+                            !editable ||
+                            (selectedShape.type === "group" &&
+                              ["width", "height", "rotation"].includes(k))
+                          }
                           aria-label={k}
                           type="number"
                           value={Math.round(selectedShape[k])}
@@ -1791,40 +2602,41 @@ export default function Editor({
                   )}
                 </div>
               </div>
-              {selectedShape.type !== "image" && (
-                <div className="property-section">
-                  <h4>Fill</h4>
-                  <label className="fill-control">
-                    <input
-                      disabled={!editable}
-                      aria-label="Fill color"
-                      type="color"
-                      value={selectedShape.fill}
-                      onChange={(e) => patch({ fill: e.target.value })}
-                    />
-                    <span>{selectedShape.fill.toUpperCase()}</span>
-                    <span>100%</span>
-                  </label>
-                  <div className="swatches">
-                    {[
-                      "#a99bef",
-                      "#284c38",
-                      "#e3e9dc",
-                      "#f4d5a7",
-                      "#b87c5f",
-                      "#ffffff",
-                      "#202b28",
-                    ].map((c) => (
-                      <button
-                        key={c}
-                        aria-label={`Set fill ${c}`}
-                        style={{ background: c }}
-                        onClick={() => patch({ fill: c })}
+              {selectedShape.type !== "image" &&
+                selectedShape.type !== "group" && (
+                  <div className="property-section">
+                    <h4>Fill</h4>
+                    <label className="fill-control">
+                      <input
+                        disabled={!editable}
+                        aria-label="Fill color"
+                        type="color"
+                        value={selectedShape.fill}
+                        onChange={(e) => patch({ fill: e.target.value })}
                       />
-                    ))}
+                      <span>{selectedShape.fill.toUpperCase()}</span>
+                      <span>100%</span>
+                    </label>
+                    <div className="swatches">
+                      {[
+                        "#a99bef",
+                        "#284c38",
+                        "#e3e9dc",
+                        "#f4d5a7",
+                        "#b87c5f",
+                        "#ffffff",
+                        "#202b28",
+                      ].map((c) => (
+                        <button
+                          key={c}
+                          aria-label={`Set fill ${c}`}
+                          style={{ background: c }}
+                          onClick={() => patch({ fill: c })}
+                        />
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
               {selectedShape.type === "text" && (
                 <div className="property-section">
                   <h4>Typography</h4>
