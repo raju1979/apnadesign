@@ -35,6 +35,7 @@ import {
   Copy,
   ArrowUp,
   ArrowDown,
+  ArrowLeft,
   PanelLeft,
   PanelRight,
   Check,
@@ -82,7 +83,7 @@ import {
   isLocked,
   boxSelection,
   alignmentPatches,
-  snapMove,
+  prepareSnapMove,
   clipboardCopies,
 } from "../lib/selection";
 type Peer = {
@@ -383,6 +384,8 @@ export default function Editor({
     canvasSize = useRef<{ width: number; height: number } | null>(null),
     imageInput = useRef<HTMLInputElement>(null),
     dragSession = useRef<{
+      snap: ReturnType<typeof prepareSnapMove>;
+      snapShapes: Shape[];
       leader: Shape;
       roots: Shape[];
       dx: number;
@@ -849,9 +852,18 @@ export default function Editor({
         )?.id || selectionTarget(shape, activeShapes);
     const ids = selectionIds.has(target) ? [...selectionIds] : [target];
     if (!selectionIds.has(target)) selectIds(ids);
+    const movingRoots = roots(activeShapes, ids).filter(
+      (s) => !isLocked(s, activeShapes),
+    );
     dragSession.current = {
+      snap: prepareSnapMove(
+        activeShapes,
+        movingRoots.map((s) => s.id),
+        geometry,
+      ),
+      snapShapes: activeShapes,
       leader: { ...shape },
-      roots: roots(activeShapes, ids).filter((s) => !isLocked(s, activeShapes)),
+      roots: movingRoots,
       dx: 0,
       dy: 0,
     };
@@ -867,15 +879,18 @@ export default function Editor({
       node.y() -
       (shape.type === "ellipse" ? shape.height / 2 : 0) -
       drag.leader.y;
+    // Rebuild when collaborators change the document during this drag.
+    if (drag.snapShapes !== activeShapes) {
+      drag.snap = prepareSnapMove(
+        activeShapes,
+        drag.roots.map((s) => s.id),
+        geometry,
+      );
+      drag.snapShapes = activeShapes;
+    }
     const snapped =
       snapEnabled && !alt
-        ? snapMove(
-            activeShapes,
-            drag.roots.map((s) => s.id),
-            dx,
-            dy,
-            6 / zoom,
-          )
+        ? drag.snap(dx, dy, 6 / zoom)
         : { dx, dy, guides: [] };
     drag.dx = snapped.dx;
     drag.dy = snapped.dy;
@@ -1688,9 +1703,15 @@ export default function Editor({
           </>
         )}
         <header className="topbar">
-          <Brand />
+          <Brand href="/" />
           <div className="document-title">
-            <span className="breadcrumb">Workspace /</span>
+            <a
+              className="breadcrumb workspace-home"
+              href="/"
+              title="Back to projects"
+            >
+              Workspace /
+            </a>
             <input
               disabled={!editable}
               aria-label="Document title"
@@ -1707,13 +1728,15 @@ export default function Editor({
             <span className="role-badge">
               {role === "viewer" ? "View only" : role || "Connecting"}
             </span>
-            <button
-              className="icon-button"
-              title="Your projects"
-              onClick={() => (location.href = "/")}
+            <a
+              className="projects-home-link"
+              href="/"
+              aria-label="Back to projects"
+              title="Back to projects"
             >
-              <Layers size={17} />
-            </button>
+              <ArrowLeft size={16} />
+              <span>Back to projects</span>
+            </a>
             <button
               className="icon-button"
               title="Sign out"
@@ -2102,7 +2125,7 @@ export default function Editor({
                 width: Math.abs(marquee.end.x - marquee.start.x),
                 height: Math.abs(marquee.end.y - marquee.start.y),
               };
-              const ids = boxSelection(activeShapes, box);
+              const ids = boxSelection(activeShapes, box, geometry);
               selectIds([
                 ...new Set([
                   ...(marquee.additive ? [...selectionIds] : []),

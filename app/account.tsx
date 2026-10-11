@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import { initialDocument } from "../lib/document";
@@ -12,6 +12,7 @@ import {
   LockKeyhole,
   Mail,
   UserRound,
+  Trash2,
 } from "lucide-react";
 type Project = {
   id: string;
@@ -28,7 +29,16 @@ export default function Account({ session }: { session: Session | null }) {
     [password, setPassword] = useState(""),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
-    [projects, setProjects] = useState<Project[]>([]);
+    [projects, setProjects] = useState<Project[]>([]),
+    [deleteTarget, setDeleteTarget] = useState<Project | null>(null),
+    [deleting, setDeleting] = useState(false),
+    [deleteError, setDeleteError] = useState("");
+  const deleteDialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = deleteDialog.current;
+    if (deleteTarget && dialog && !dialog.open) dialog.showModal();
+    else if (!deleteTarget && dialog?.open) dialog.close();
+  }, [deleteTarget]);
   useEffect(() => {
     if (new URLSearchParams(location.search).get("auth") === "signin")
       setMode("signin");
@@ -123,6 +133,40 @@ export default function Account({ session }: { session: Session | null }) {
       setBusy(false);
     } else location.href = `?room=${id}`;
   }
+  async function deleteProject() {
+    const project = deleteTarget;
+    if (!session || !project || deleting) return;
+    if (project.owner_id !== session.user.id) {
+      setDeleteError("Only the owner can delete this project.");
+      return;
+    }
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      const { data, error } = await supabase
+        .from("formwork_projects")
+        .delete()
+        .eq("id", project.id)
+        .eq("owner_id", session.user.id)
+        .select("id");
+      if (error) throw new Error(error.message);
+      if (!data?.some((row) => row.id === project.id))
+        throw new Error(
+          "The project could not be deleted. Refresh your projects and try again.",
+        );
+      setProjects((current) => current.filter((p) => p.id !== project.id));
+      setDeleteTarget(null);
+      setMessage(`Deleted “${project.title}”.`);
+    } catch (error) {
+      setDeleteError(
+        error instanceof Error
+          ? error.message
+          : "Unable to delete this project.",
+      );
+    } finally {
+      setDeleting(false);
+    }
+  }
   return (
     <main className="account-page">
       <header className="account-header">
@@ -130,6 +174,7 @@ export default function Account({ session }: { session: Session | null }) {
         {session && (
           <button
             className="account-signout"
+            disabled={deleting}
             onClick={() => supabase.auth.signOut()}
           >
             <LogOut size={15} />
@@ -149,7 +194,11 @@ export default function Account({ session }: { session: Session | null }) {
                   : `Signed in as ${session.user.email}`}
               </p>
             </div>
-            <button className="share-button" disabled={busy} onClick={create}>
+            <button
+              className="share-button"
+              disabled={busy || deleting}
+              onClick={create}
+            >
               <Plus size={16} />
               New design
             </button>
@@ -161,35 +210,55 @@ export default function Account({ session }: { session: Session | null }) {
           )}
           <div className="projects-grid">
             {projects.map((p) => (
-              <a className="project-card" href={`?room=${p.id}`} key={p.id}>
-                <div className="project-preview">
-                  <span>leaf & light</span>
-                  <b>
-                    Ideas belong
-                    <br />
-                    out in the world.
-                  </b>
-                  <i />
-                </div>
-                <div className="project-card-info">
-                  <div>
-                    <b>{p.title}</b>
-                    <small>
-                      {p.owner_id === session.user.id
-                        ? "Owned by you"
-                        : "Shared with you"}{" "}
-                      · {new Date(p.updated_at).toLocaleDateString()}
-                    </small>
+              <article className="project-card" key={p.id}>
+                <a
+                  className="project-card-link"
+                  href={`?room=${p.id}`}
+                  aria-label={`Open project ${p.title}`}
+                >
+                  <div className="project-preview">
+                    <span>leaf & light</span>
+                    <b>
+                      Ideas belong
+                      <br />
+                      out in the world.
+                    </b>
+                    <i />
                   </div>
-                  <ArrowUpRight size={19} />
-                </div>
-              </a>
+                  <div className="project-card-info">
+                    <div>
+                      <b>{p.title}</b>
+                      <small>
+                        {p.owner_id === session.user.id
+                          ? "Owned by you"
+                          : "Shared with you"}{" "}
+                        · {new Date(p.updated_at).toLocaleDateString()}
+                      </small>
+                    </div>
+                    <ArrowUpRight size={19} />
+                  </div>
+                </a>
+                {p.owner_id === session.user.id && (
+                  <button
+                    className="project-delete"
+                    aria-label={`Delete project ${p.title}`}
+                    disabled={busy || deleting}
+                    onClick={() => {
+                      setDeleteError("");
+                      setDeleteTarget(p);
+                    }}
+                  >
+                    <Trash2 size={14} />
+                    Delete
+                  </button>
+                )}
+              </article>
             ))}
             {!projects.length && (
               <button
                 className="empty-project"
                 onClick={create}
-                disabled={busy}
+                disabled={busy || deleting}
               >
                 <Plus size={30} />
                 <b>Your first idea starts here</b>
@@ -203,6 +272,60 @@ export default function Account({ session }: { session: Session | null }) {
               ? "Guest designs stay with this browser session. Keep this browser data to keep access."
               : "Projects are private. You decide who can view or edit."}
           </p>
+          <dialog
+            ref={deleteDialog}
+            className="delete-project-dialog"
+            aria-labelledby="delete-project-title"
+            aria-describedby="delete-project-description"
+            onCancel={(event) => {
+              event.preventDefault();
+              if (!deleting) setDeleteTarget(null);
+            }}
+            onClick={(event) => {
+              const bounds = event.currentTarget.getBoundingClientRect();
+              if (
+                !deleting &&
+                event.target === event.currentTarget &&
+                (event.clientX < bounds.left ||
+                  event.clientX > bounds.right ||
+                  event.clientY < bounds.top ||
+                  event.clientY > bounds.bottom)
+              )
+                setDeleteTarget(null);
+            }}
+          >
+            <span className="delete-project-icon">
+              <Trash2 size={22} />
+            </span>
+            <h2 id="delete-project-title">Delete this project?</h2>
+            <p id="delete-project-description">
+              <strong>“{deleteTarget?.title}”</strong> will be permanently
+              deleted, including its pages and sharing access for everyone. This
+              cannot be undone.
+            </p>
+            {deleteError && (
+              <div className="auth-message" role="alert">
+                {deleteError}
+              </div>
+            )}
+            <div className="delete-project-actions">
+              <button
+                className="delete-project-cancel"
+                autoFocus
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="delete-project-confirm"
+                disabled={deleting}
+                onClick={deleteProject}
+              >
+                {deleting ? "Deleting…" : "Delete project"}
+              </button>
+            </div>
+          </dialog>
         </section>
       ) : (
         <section className="auth-layout">

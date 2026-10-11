@@ -30,6 +30,8 @@ Room links alone do not grant access. Auth tokens are sent as the first WebSocke
 
 Authenticated projects are saved in Supabase. Legacy local `.data/` designs are excluded from this repository and are not automatically claimed or exposed to accounts.
 
+Owners can use **Delete** on a project card in the dashboard. The confirmation names the project and permanently removes its document, pages, memberships, and guest sharing records. Shared projects have no delete control for collaborators. Uploaded image files remain in private Storage; automatic cleanup is not included.
+
 ## Editor features
 
 Multiple pages with independent layers and page-scoped collaborator edits; shapes, text, images, and frames; drag, resize, rotate; fill and typography; layer names, visibility, locking and ordering; zoom and pan; duplicate/delete; conflict-aware local undo/redo; viewport PNG export; live cursors, selections, and drag previews; reconnect outbox; project-scoped private image uploads; oversized still images are converted to WebP in the browser and kept under 500 KB; frame membership, click destinations, and a click-through prototype preview.
@@ -41,6 +43,8 @@ Drag a selection box from empty canvas or Shift-click layers/objects to select s
 Use **Copy/Paste** or Cmd/Ctrl+C/V to copy selections between pages and projects. Pasted groups retain their children; private images can only be pasted within their original project. **Group** (Cmd/Ctrl+G) combines objects in the same frame; **Ungroup** (Cmd/Ctrl+Shift+G) releases them. Groups appear as collapsible containers in Layers and move their members together. Select a member in Layers to edit it individually. Right-click an object or selection for copy/paste, grouping, duplicate, rename, ordering, frame selection, visibility, locking, and deletion. Multi-object actions are saved and undone together.
 
 Use the panel icons at the top-left and top-right of the canvas to hide or show Layers and Properties independently. Cmd/Ctrl+Backslash toggles both panels. The canvas expands into the freed space and keeps its current centre and zoom. On narrow screens the same buttons open one sidebar as an overlay.
+
+Return to the dashboard with **Back to projects**, the **Workspace** breadcrumb, or the **ApnaDesign** logo in the editor header. Your account or guest session stays signed in.
 
 ## Rust / WebAssembly
 
@@ -83,3 +87,9 @@ For deployment, use a persistent Node host with WebSocket support and HTTPS; Ver
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Geometry performance
+
+Rust/WASM now computes individual object bounds in a single batch for box selection and snap-guide preparation. Snapping prepares a sorted anchor index once per drag and performs binary searches on pointer updates; collaborator document changes invalidate the index. JavaScript remains a fallback when WASM cannot load.
+
+Run `npm run benchmark:geometry` to compare 1,000- and 5,000-object scenes. See [benchmark results and methodology](benchmarks/RESULTS.md). These measurements cover geometry CPU time, not whole-editor frame rates.

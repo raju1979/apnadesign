@@ -1,5 +1,10 @@
 import type { Shape } from "./document";
-import { javascriptBounds, type Bounds } from "./geometry";
+import {
+  javascriptBounds,
+  javascriptGeometry,
+  type GeometryEngine,
+  type Bounds,
+} from "./geometry";
 
 export function parentId(shape: Shape, shapes: Shape[]): string | undefined {
   if (
@@ -74,10 +79,15 @@ export function layers(shapes: Shape[]) {
   for (const shape of reversed) if (!seen.has(shape.id)) visit(shape, []);
   return result;
 }
-export function boxSelection(shapes: Shape[], box: Bounds) {
-  const contained = shapes.filter((s) => {
+export function boxSelection(
+  shapes: Shape[],
+  box: Bounds,
+  geometry: GeometryEngine = javascriptGeometry,
+) {
+  const bounds = geometry.batchBounds(shapes);
+  const contained = shapes.filter((s, i) => {
     if (isHidden(s, shapes) || isLocked(s, shapes)) return false;
-    const b = javascriptBounds([s]);
+    const b = bounds[i];
     return (
       b &&
       b.x >= box.x &&
@@ -207,4 +217,101 @@ export function clipboardCopies(
     targetFrameId: ids.get(s.targetFrameId || "") || "",
     locked: false,
   }));
+}
+
+/** Build once per drag; pointer updates search sorted anchors instead of scanning the scene. */
+export function prepareSnapMove(
+  shapes: Shape[],
+  ids: Iterable<string>,
+  geometry: GeometryEngine = javascriptGeometry,
+) {
+  const items = roots(shapes, ids);
+  const bounds = geometry.bounds(items);
+  const moving = new Set(
+    expandSelection(
+      shapes,
+      items.map((s) => s.id),
+    ).map((s) => s.id),
+  );
+  const targets = shapes.filter(
+    (s) => !moving.has(s.id) && !isHidden(s, shapes) && s.type !== "group",
+  );
+  const boxes = geometry.batchBounds(targets);
+  type Anchor = { value: number; order: number };
+  const axes: { x: Anchor[]; y: Anchor[] } = { x: [], y: [] };
+  boxes.forEach((b, i) => {
+    if (!b) return;
+    for (const axis of ["x", "y"] as const) {
+      const size = axis === "x" ? b.width : b.height;
+      [b[axis], b[axis] + size / 2, b[axis] + size].forEach((value, j) =>
+        axes[axis].push({ value, order: i * 3 + j }),
+      );
+    }
+  });
+  for (const axis of ["x", "y"] as const) {
+    axes[axis].sort((a, b) => a.value - b.value || a.order - b.order);
+    axes[axis] = axes[axis].filter(
+      (a, i, list) => i === 0 || a.value !== list[i - 1].value,
+    );
+  }
+  return (dx: number, dy: number, tolerance: number) => {
+    const result = {
+      dx,
+      dy,
+      guides: [] as { axis: "x" | "y"; value: number }[],
+    };
+    if (!bounds) return result;
+    for (const axis of ["x", "y"] as const) {
+      const list = axes[axis],
+        size = axis === "x" ? bounds.width : bounds.height;
+      let best:
+        | {
+            distance: number;
+            offset: number;
+            value: number;
+            order: number;
+            anchor: number;
+          }
+        | undefined;
+      [
+        bounds[axis] + result[axis === "x" ? "dx" : "dy"],
+        bounds[axis] + size / 2 + result[axis === "x" ? "dx" : "dy"],
+        bounds[axis] + size + result[axis === "x" ? "dx" : "dy"],
+      ].forEach((value, anchor) => {
+        let lo = 0,
+          hi = list.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >>> 1;
+          if (list[mid].value < value) lo = mid + 1;
+          else hi = mid;
+        }
+        for (const index of [lo - 1, lo]) {
+          const target = list[index];
+          if (!target) continue;
+          const offset = target.value - value,
+            distance = Math.abs(offset);
+          if (
+            distance <= tolerance &&
+            (!best ||
+              distance < best.distance ||
+              (distance === best.distance &&
+                (target.order < best.order ||
+                  (target.order === best.order && anchor < best.anchor))))
+          )
+            best = {
+              distance,
+              offset,
+              value: target.value,
+              order: target.order,
+              anchor,
+            };
+        }
+      });
+      if (best) {
+        result[axis === "x" ? "dx" : "dy"] += best.offset;
+        result.guides.push({ axis, value: best.value });
+      }
+    }
+    return result;
+  };
 }

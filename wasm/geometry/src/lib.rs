@@ -84,6 +84,23 @@ pub unsafe extern "C" fn scene_bounds(input: *const f64, len: usize, output: *mu
     }
 }
 
+/// Writes one bounds record per input shape, or NaNs for invalid records.
+/// # Safety
+/// Input must hold len f64s, output must hold (len / STRIDE) * 4 f64s.
+#[no_mangle]
+pub unsafe extern "C" fn shape_bounds(input: *const f64, len: usize, output: *mut f64) {
+    if input.is_null() || output.is_null() || len % STRIDE != 0 {
+        return;
+    }
+    for (i, record) in std::slice::from_raw_parts(input, len)
+        .chunks_exact(STRIDE)
+        .enumerate()
+    {
+        let result = bounds(record).unwrap_or([f64::NAN; 4]);
+        std::ptr::copy_nonoverlapping(result.as_ptr(), output.add(i * 4), 4);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

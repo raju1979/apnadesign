@@ -167,3 +167,27 @@ test("browser loader supports streaming, incorrect MIME types, and missing/corru
   }
   assert.equal((await loadGeometryAsset(url)).kind, "javascript");
 });
+
+test("batched WASM bounds preserve shape order, hidden and invalid records", () => {
+  const instance = new WebAssembly.Instance(compiledModule);
+  const engine = createWasmGeometry(instance);
+  const shapes = Array.from({ length: 5000 }, (_, i) =>
+    shape({
+      id: `s${i}`,
+      x: i * 7,
+      y: -i * 3,
+      rotation: i % 360,
+      type: i % 2 ? "rect" : "ellipse",
+      hidden: i % 17 === 0,
+      width: i % 19 === 0 ? 0 : 100,
+    }),
+  );
+  const actual = engine.batchBounds(shapes);
+  actual.forEach((b, i) => near(b, javascriptBounds([shapes[i]])));
+  assert.deepEqual(engine.batchBounds([]), []);
+  const memory = instance.exports.memory as WebAssembly.Memory;
+  const size = memory.buffer.byteLength;
+  for (let i = 0; i < 50; i++) engine.batchBounds(shapes);
+  assert.equal(memory.buffer.byteLength, size);
+  assert.equal(engine.kind, "wasm");
+});

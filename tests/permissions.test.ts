@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
-test("database enforces private projects, viewer access, owner-only sharing and revocation", async () => {
+test("database enforces private projects, owner-only deletion, sharing and revocation", async () => {
   const db = new PGlite();
   try {
     await db.exec(
@@ -214,6 +214,73 @@ test("database enforces private projects, viewer access, owner-only sharing and 
       (await db.query("select * from public.formwork_projects")).rows.length,
       0,
       "revoking a link must remove access for visitors who claimed it",
+    );
+    await as(0);
+    await db.exec(
+      `insert into public.formwork_projects(id,title,document) values('keep','Keep this project','{"title":"Keep","shapes":[]}');
+       insert into public.formwork_members values('secure','viewer@example.test','viewer');`,
+    );
+    const deleteLinkHash = "d".repeat(64);
+    await db.query("select public.create_project_share('secure',$1)", [
+      deleteLinkHash,
+    ]);
+    await as(4);
+    await db.query("select public.claim_project_share('secure',$1)", [
+      deleteLinkHash,
+    ]);
+    for (const index of [1, 2, 3, 4]) {
+      await as(index);
+      assert.deepEqual(
+        (
+          await db.query(
+            "delete from public.formwork_projects where id='secure' returning id",
+          )
+        ).rows,
+        [],
+        "editors, viewers, outsiders and guest viewers cannot delete a project",
+      );
+    }
+    await as(0);
+    assert.deepEqual(
+      (
+        await db.query(
+          "delete from public.formwork_projects where id='secure' returning id",
+        )
+      ).rows,
+      [{ id: "secure" }],
+      "the owner can delete the selected project",
+    );
+    assert.deepEqual(
+      (await db.query("select id from public.formwork_projects")).rows,
+      [{ id: "keep" }],
+      "deleting a project must not delete any other project",
+    );
+    await db.exec("reset role");
+    for (const table of ["formwork_members", "formwork_share_links"])
+      assert.equal(
+        (
+          await db.query(
+            `select * from public.${table} where project_id='secure'`,
+          )
+        ).rows.length,
+        0,
+        "project deletion must remove membership and guest sharing records",
+      );
+    assert.equal(
+      (await db.query("select * from formwork_private.project_share_guests"))
+        .rows.length,
+      0,
+      "project deletion must also cascade through links to guest claims",
+    );
+    await as(1);
+    assert.equal(
+      (
+        await db.query<{ get_project_role: string | null }>(
+          "select public.get_project_role('secure')",
+        )
+      ).rows[0].get_project_role,
+      null,
+      "collaborators lose access to deleted projects",
     );
   } finally {
     await db.close();

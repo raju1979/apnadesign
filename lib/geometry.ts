@@ -9,12 +9,14 @@ export type Bounds = { x: number; y: number; width: number; height: number };
 export type GeometryEngine = {
   kind: "wasm" | "javascript";
   bounds(shapes: readonly GeometryShape[]): Bounds | null;
+  batchBounds(shapes: readonly GeometryShape[]): (Bounds | null)[];
 };
 type GeometryExports = {
   memory: WebAssembly.Memory;
   abi_version(): number;
   alloc_f64(length: number): number;
   free_f64(pointer: number, length: number): void;
+  shape_bounds(input: number, length: number, output: number): void;
   scene_bounds(input: number, length: number, output: number): number;
 };
 
@@ -75,6 +77,7 @@ export function javascriptBounds(
 export const javascriptGeometry: GeometryEngine = {
   kind: "javascript",
   bounds: javascriptBounds,
+  batchBounds: (shapes) => shapes.map((shape) => javascriptBounds([shape])),
 };
 
 /** One batched WASM call per scene; allocations never escape this adapter. */
@@ -84,15 +87,67 @@ export function createWasmGeometry(
   const api = instance.exports as unknown as GeometryExports;
   if (
     !(api.memory instanceof WebAssembly.Memory) ||
-    [api.abi_version, api.alloc_f64, api.free_f64, api.scene_bounds].some(
-      (fn) => typeof fn !== "function",
-    ) ||
+    [
+      api.abi_version,
+      api.alloc_f64,
+      api.free_f64,
+      api.scene_bounds,
+      api.shape_bounds,
+    ].some((fn) => typeof fn !== "function") ||
     api.abi_version() !== 1
   )
     throw new Error("Unsupported geometry WASM module.");
 
   const engine: GeometryEngine = {
     kind: "wasm",
+    batchBounds(shapes) {
+      if (engine.kind === "javascript")
+        return javascriptGeometry.batchBounds(shapes);
+      if (!shapes.length) return [];
+      let input = 0,
+        output = 0;
+      try {
+        input = api.alloc_f64(shapes.length * 6);
+        output = api.alloc_f64(shapes.length * 4);
+        const records = new Float64Array(
+          api.memory.buffer,
+          input,
+          shapes.length * 6,
+        );
+        for (let i = 0; i < shapes.length; i++) {
+          const s = shapes[i],
+            at = i * 6;
+          records[at] = s.hidden ? NaN : s.x;
+          records[at + 1] = s.y;
+          records[at + 2] = s.width;
+          records[at + 3] = s.height;
+          records[at + 4] = s.rotation;
+          records[at + 5] = s.type === "ellipse" ? 1 : 0;
+        }
+        api.shape_bounds(input, shapes.length * 6, output);
+        const values = new Float64Array(
+          api.memory.buffer,
+          output,
+          shapes.length * 4,
+        );
+        return shapes.map((_, i) => {
+          const at = i * 4;
+          const x = values[at],
+            y = values[at + 1],
+            right = values[at + 2],
+            bottom = values[at + 3];
+          return [x, y, right, bottom].every(Number.isFinite)
+            ? { x, y, width: right - x, height: bottom - y }
+            : null;
+        });
+      } catch {
+        engine.kind = "javascript";
+        return javascriptGeometry.batchBounds(shapes);
+      } finally {
+        if (output) api.free_f64(output, shapes.length * 4);
+        if (input) api.free_f64(input, shapes.length * 6);
+      }
+    },
     bounds(shapes) {
       if (engine.kind === "javascript") return javascriptBounds(shapes);
       const valid = visibleValidShapes(shapes);

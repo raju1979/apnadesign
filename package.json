@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:multiplayer": "tsx tests/multiplayer.ts",
-    "test:server": "tsx tests/server-security.ts"
+    "test:server": "tsx tests/server-security.ts",
+    "benchmark:geometry": "tsx benchmarks/geometry.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",
