@@ -20,13 +20,19 @@ type Project = {
   updated_at: string;
 };
 export default function Account({ session }: { session: Session | null }) {
-  const [mode, setMode] = useState<"guest" | "signin" | "signup">("guest"),
+  const [mode, setMode] = useState<"guest" | "signin" | "signup" | "forgot">(
+      "guest",
+    ),
     [displayName, setDisplayName] = useState(""),
     [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
     [projects, setProjects] = useState<Project[]>([]);
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get("auth") === "signin")
+      setMode("signin");
+  }, []);
   useEffect(() => {
     if (session)
       supabase
@@ -43,7 +49,18 @@ export default function Account({ session }: { session: Session | null }) {
     setBusy(true);
     setMessage("");
     try {
-      if (mode === "signup") {
+      if (mode === "forgot") {
+        const { error } = await supabase.auth.resetPasswordForEmail(
+          email.trim(),
+          {
+            redirectTo: `${location.origin}/reset-password`,
+          },
+        );
+        if (error) throw error;
+        setMessage(
+          "If an account exists for this email, you’ll receive a password reset link.",
+        );
+      } else if (mode === "signup") {
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
@@ -216,16 +233,32 @@ export default function Account({ session }: { session: Session | null }) {
                 ? "Come on in."
                 : mode === "signup"
                   ? "Create your account."
-                  : "Welcome back."}
+                  : mode === "forgot"
+                    ? "Reset your password."
+                    : "Welcome back."}
             </h2>
             <p>
               {mode === "guest"
                 ? "Type your name to step into the studio."
                 : mode === "signup"
                   ? "A little space for your next big idea."
-                  : "Sign in to pick up where you left off."}
+                  : mode === "forgot"
+                    ? "Enter your email and we’ll send you a reset link."
+                    : "Sign in to pick up where you left off."}
             </p>
             <form onSubmit={mode === "guest" ? enterAsGuest : authenticate}>
+              {mode === "signin" && (
+                <button
+                  className="auth-switch"
+                  onClick={() => {
+                    setMode("forgot");
+                    setMessage("");
+                    setPassword("");
+                  }}
+                >
+                  Forgot password?
+                </button>
+              )}
               {mode === "guest" ? (
                 <label>
                   Your name
@@ -264,19 +297,23 @@ export default function Account({ session }: { session: Session | null }) {
                       onChange={(e) => setEmail(e.target.value)}
                     />
                   </label>
-                  <label>
-                    Password
-                    <input
-                      type="password"
-                      autoComplete={
-                        mode === "signup" ? "new-password" : "current-password"
-                      }
-                      minLength={mode === "signup" ? 8 : undefined}
-                      required
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                    />
-                  </label>
+                  {mode !== "forgot" && (
+                    <label>
+                      Password
+                      <input
+                        type="password"
+                        autoComplete={
+                          mode === "signup"
+                            ? "new-password"
+                            : "current-password"
+                        }
+                        minLength={mode === "signup" ? 8 : undefined}
+                        required
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                      />
+                    </label>
+                  )}
                 </>
               )}
               {message && (
@@ -291,7 +328,9 @@ export default function Account({ session }: { session: Session | null }) {
                     ? "Enter the studio"
                     : mode === "signup"
                       ? "Create account"
-                      : "Sign in"}
+                      : mode === "forgot"
+                        ? "Send reset link"
+                        : "Sign in"}
                 {mode === "guest" ? (
                   <ArrowUpRight size={16} />
                 ) : (
@@ -300,19 +339,40 @@ export default function Account({ session }: { session: Session | null }) {
               </button>
             </form>
             {mode === "guest" ? (
-              <button className="auth-switch" onClick={() => setMode("signin")}>
-                Already have an account? Sign in
-              </button>
+              <>
+                <button
+                  className="auth-switch"
+                  onClick={() => {
+                    setMode("signup");
+                    setMessage("");
+                  }}
+                >
+                  New here? Create an account
+                </button>
+                <button
+                  className="auth-switch"
+                  onClick={() => {
+                    setMode("signin");
+                    setMessage("");
+                  }}
+                >
+                  Already have an account? Sign in
+                </button>
+              </>
             ) : (
               <button
                 className="auth-switch"
                 onClick={() => {
-                  setMode(mode === "signup" ? "signin" : "signup");
+                  setMode(
+                    mode === "signup" || mode === "forgot"
+                      ? "signin"
+                      : "signup",
+                  );
                   setMessage("");
                 }}
               >
-                {mode === "signup"
-                  ? "Already have an account? Sign in"
+                {mode === "signup" || mode === "forgot"
+                  ? "Back to sign in"
                   : "New here? Create an account"}
               </button>
             )}

@@ -19,6 +19,11 @@ export default function Page() {
       "loading",
     );
   useEffect(() => {
+    const authResult = new URLSearchParams(location.hash.slice(1));
+    if (authResult.has("error") || authResult.get("type") === "recovery") {
+      location.replace(`/reset-password${location.hash}`);
+      return;
+    }
     const params = new URLSearchParams(location.search);
     setRoom(params.get("room"));
     setShareToken(params.get("share"));
