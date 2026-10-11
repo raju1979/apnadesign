@@ -313,7 +313,18 @@ export default function Account({ session }: { session: Session | null }) {
               >
                 {mode === "signup"
                   ? "Already have an account? Sign in"
-                  : "Continue without an account? Enter your name"}
+                  : "New here? Create an account"}
+              </button>
+            )}
+            {mode !== "guest" && (
+              <button
+                className="auth-switch"
+                onClick={() => {
+                  setMode("guest");
+                  setMessage("");
+                }}
+              >
+                Continue without an account? Enter your name
               </button>
             )}
             <div className="auth-footnote">
