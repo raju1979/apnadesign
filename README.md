@@ -36,7 +36,7 @@ Owners can use **Delete** on a project card in the dashboard. The confirmation n
 
 Multiple pages with independent layers and page-scoped collaborator edits; shapes, text, images, and frames; drag, resize, rotate; fill and typography; layer names, visibility, locking and ordering; zoom and pan; duplicate/delete; conflict-aware local undo/redo; viewport PNG export; live cursors, selections, and drag previews; reconnect outbox; project-scoped private image uploads; oversized still images are converted to WebP in the browser and kept under 500 KB; frame membership, click destinations, and a click-through prototype preview.
 
-Keyboard: V select, H pan, Space+drag temporarily pans from any tool, F frame, R rectangle, O ellipse, T text, Delete remove, Cmd/Ctrl+D duplicate, Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z redo. Ctrl/Cmd+scroll zooms around the pointer. Shift+1 or the zoom percentage fits the visible artwork on the current page.
+Keyboard: V select, H pan, Space+drag or middle-mouse drag temporarily pans from any tool, F frame, R rectangle, O ellipse, T text, Delete remove, Cmd/Ctrl+D duplicate, Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z redo. Ctrl/Cmd+scroll zooms around the pointer. Shift+1 or the zoom percentage fits the visible artwork on the current page.
 
 Drag a selection box from empty canvas or Shift-click layers/objects to select several items. Drag any selected object to move the whole selection. The selection toolbar provides six alignment options and edge/centre snapping with visible guides; hold Alt while dragging to bypass snapping, or turn it off with **Snap on**.
 

@@ -63,6 +63,7 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase, canEdit, type Role } from "../lib/supabase";
 import Sharing from "./sharing";
 import Brand from "./brand";
+import LoadingScreen from "./loading-screen";
 import {
   containingFrameId,
   withAutomaticFrame,
@@ -331,6 +332,12 @@ export default function Editor({
   session: Session;
   roomId: string;
 }) {
+  const [documentLoaded, setDocumentLoaded] = useState(false);
+  const [geometryLoaded, setGeometryLoaded] = useState(false);
+  const [fontsLoaded, setFontsLoaded] = useState(false);
+  const [assetsLoadedKey, setAssetsLoadedKey] = useState<string | null>(null);
+  const [editorReady, setEditorReady] = useState(false);
+  const [assetError, setAssetError] = useState(false);
   const [role, setRole] = useState<Role | null>(null),
     [accessError, setAccessError] = useState("");
   const editable = canEdit(role);
@@ -436,7 +443,19 @@ export default function Editor({
   useEffect(() => {
     let cancelled = false;
     void loadGeometryEngine().then((engine) => {
-      if (!cancelled) setGeometry(engine);
+      if (!cancelled) {
+        setGeometry(engine);
+        setGeometryLoaded(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    void document.fonts.ready.then(() => {
+      if (!cancelled) setFontsLoaded(true);
     });
     return () => {
       cancelled = true;
@@ -474,20 +493,47 @@ export default function Editor({
     const paths = [...new Set(imagePathKey.split("\n").filter(Boolean))];
     let cancelled = false;
     async function refreshSignedUrls() {
-      const entries = await Promise.all(
-        paths.map(async (path) => {
-          const { data, error } = await supabase.storage
-            .from("formwork-assets")
-            .createSignedUrl(path, 3600);
-          return [path, error ? "" : data.signedUrl] as const;
-        }),
-      );
-      if (!cancelled)
+      try {
+        const entries = await Promise.all(
+          paths.map(async (path) => {
+            const { data, error } = await supabase.storage
+              .from("formwork-assets")
+              .createSignedUrl(path, 3600);
+            return [path, error ? "" : data.signedUrl] as const;
+          }),
+        );
+        if (cancelled) return;
         setImageUrls(
           Object.fromEntries(entries.filter(([, url]) => url.length > 0)),
         );
+        const loaded = await Promise.all(
+          entries.map(
+            ([, url]) =>
+              new Promise<boolean>((resolve) => {
+                if (!url) {
+                  resolve(false);
+                  return;
+                }
+                const image = new window.Image();
+                image.crossOrigin = "anonymous";
+                image.onload = () => resolve(true);
+                image.onerror = () => resolve(false);
+                image.src = url;
+              }),
+          ),
+        );
+        if (!cancelled) {
+          setAssetError(loaded.some((value) => !value));
+          setAssetsLoadedKey(imagePathKey);
+        }
+      } catch {
+        if (!cancelled) {
+          setAssetError(true);
+          setAssetsLoadedKey(imagePathKey);
+        }
+      }
     }
-    void refreshSignedUrls();
+    if (documentLoaded) void refreshSignedUrls();
     const timer = window.setInterval(
       () => void refreshSignedUrls(),
       45 * 60 * 1000,
@@ -496,7 +542,7 @@ export default function Editor({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [imagePathKey, roomId, session.user.id]);
+  }, [imagePathKey, roomId, session.user.id, documentLoaded]);
   useEffect(() => {
     const id = roomId;
     setRoom(id);
@@ -571,6 +617,7 @@ export default function Editor({
             pending.current = [];
           }
           setDoc(currentDoc);
+          setDocumentLoaded(true);
           docRef.current = currentDoc;
           setActivePageId((current) =>
             getPages(currentDoc).some((page) => page.id === current)
@@ -1605,6 +1652,117 @@ export default function Editor({
       a.click();
     }
   }
+  useEffect(() => {
+    if (
+      editorReady ||
+      !documentLoaded ||
+      !geometryLoaded ||
+      !fontsLoaded ||
+      assetsLoadedKey !== imagePathKey ||
+      !canvasSize.current
+    )
+      return;
+    const frame = requestAnimationFrame(() => {
+      stage.current?.draw();
+      setEditorReady(true);
+      if (assetError)
+        setNotice("Some images could not load. Refresh to try again.");
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [
+    editorReady,
+    documentLoaded,
+    geometryLoaded,
+    fontsLoaded,
+    assetsLoadedKey,
+    imagePathKey,
+    size,
+    assetError,
+  ]);
+  useEffect(() => {
+    const el = container.current;
+    if (!el || !editorReady) return;
+    let middlePan: {
+      pointerId: number;
+      x: number;
+      y: number;
+      panX: number;
+      panY: number;
+    } | null = null;
+    function stop(event: Event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    function down(event: PointerEvent) {
+      if (event.button !== 1 || !(event.target instanceof HTMLCanvasElement))
+        return;
+      const canvas = stage.current;
+      if (!canvas) return;
+      stop(event);
+      middlePan = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        panX: canvas.x(),
+        panY: canvas.y(),
+      };
+      el!.setPointerCapture(event.pointerId);
+      setCanvasDragging(true);
+    }
+    function move(event: PointerEvent) {
+      if (!middlePan || event.pointerId !== middlePan.pointerId) return;
+      stop(event);
+      const next = {
+        x: middlePan.panX + event.clientX - middlePan.x,
+        y: middlePan.panY + event.clientY - middlePan.y,
+      };
+      stage.current?.position(next);
+      stage.current?.batchDraw();
+      setPan(next);
+    }
+    function finish() {
+      const pointerId = middlePan?.pointerId;
+      middlePan = null;
+      if (pointerId !== undefined && el!.hasPointerCapture(pointerId))
+        el!.releasePointerCapture(pointerId);
+      setCanvasDragging(false);
+    }
+    function up(event: PointerEvent) {
+      if (!middlePan || event.pointerId !== middlePan.pointerId) return;
+      stop(event);
+      finish();
+    }
+    function suppressMiddle(event: MouseEvent) {
+      if (event.button === 1 && event.target instanceof HTMLCanvasElement)
+        stop(event);
+    }
+    el.addEventListener("pointerdown", down, true);
+    el.addEventListener("mousedown", suppressMiddle, true);
+    el.addEventListener("auxclick", suppressMiddle, true);
+    el.addEventListener("lostpointercapture", finish);
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    window.addEventListener("blur", finish);
+    return () => {
+      finish();
+      el.removeEventListener("pointerdown", down, true);
+      el.removeEventListener("mousedown", suppressMiddle, true);
+      el.removeEventListener("auxclick", suppressMiddle, true);
+      el.removeEventListener("lostpointercapture", finish);
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+      window.removeEventListener("blur", finish);
+    };
+  }, [editorReady]);
+  const loadingMessage = !documentLoaded
+    ? status === "Reconnecting"
+      ? "Reconnecting to your project…"
+      : "Connecting and loading your design…"
+    : assetsLoadedKey !== imagePathKey
+      ? "Loading canvas images…"
+      : "Preparing your canvas…";
   const tools = [
     { id: "select", Icon: MousePointer2, label: "Select (V)" },
     { id: "hand", Icon: Hand, label: "Pan (H)" },
@@ -1615,7 +1773,12 @@ export default function Editor({
   ] as const;
   return (
     <>
+      {!editorReady && !accessError && (
+        <LoadingScreen message={loadingMessage} overlay />
+      )}
       <main
+        inert={!editorReady && !accessError}
+        aria-busy={!editorReady}
         className={
           "app" +
           (!layersOpen ? " layers-hidden" : "") +
@@ -2490,10 +2653,10 @@ export default function Editor({
           </div>
           <div className="canvas-hint">
             {tool === "select"
-              ? "V select · Space + drag to pan · F frame · R rectangle · O ellipse · T text"
+              ? "V select · Space / middle mouse + drag to pan · F frame · R rectangle · O ellipse · T text"
               : tool === "hand"
                 ? "Drag to move around your canvas"
-                : `Click the canvas to add ${tool === "ellipse" ? "an" : "a"} ${tool} · Space + drag to pan`}
+                : `Click the canvas to add ${tool === "ellipse" ? "an" : "a"} ${tool} · Space / middle mouse + drag to pan`}
             <span>⌘/Ctrl + \ panels · ⌘ + scroll to zoom</span>
           </div>
         </section>

@@ -5,9 +5,10 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import Account from "./account";
 import Brand from "./brand";
+import LoadingScreen from "./loading-screen";
 const Editor = dynamic(() => import("./editor"), {
   ssr: false,
-  loading: () => <div className="loading">Opening your studio…</div>,
+  loading: () => <LoadingScreen />,
 });
 export default function Page() {
   const [session, setSession] = useState<Session | null>(null),
@@ -100,10 +101,10 @@ export default function Page() {
       cancelled = true;
     };
   }, [routeReady, room, session?.user.id, shareToken]);
-  if (!ready) return <div className="loading">Opening your studio…</div>;
+  if (!ready) return <LoadingScreen />;
   if (!session) return <Account session={session} />;
   if (!routeReady || (shareToken && shareStatus === "loading"))
-    return <div className="loading">Checking your guest link…</div>;
+    return <LoadingScreen message="Checking your guest link…" />;
   if (shareStatus === "invalid")
     return (
       <main className="account-page">

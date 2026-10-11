@@ -4,6 +4,7 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import { initialDocument } from "../lib/document";
 import Brand from "./brand";
+import LoadingScreen from "./loading-screen";
 import {
   ArrowUpRight,
   Plus,
@@ -29,6 +30,7 @@ export default function Account({ session }: { session: Session | null }) {
     [password, setPassword] = useState(""),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
+    [projectsLoading, setProjectsLoading] = useState(!!session),
     [projects, setProjects] = useState<Project[]>([]),
     [deleteTarget, setDeleteTarget] = useState<Project | null>(null),
     [deleting, setDeleting] = useState(false),
@@ -44,15 +46,33 @@ export default function Account({ session }: { session: Session | null }) {
       setMode("signin");
   }, []);
   useEffect(() => {
-    if (session)
-      supabase
-        .from("formwork_projects")
-        .select("id,title,owner_id,updated_at")
-        .order("updated_at", { ascending: false })
-        .then(({ data, error }) => {
+    if (!session) {
+      setProjectsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setProjectsLoading(true);
+    void supabase
+      .from("formwork_projects")
+      .select("id,title,owner_id,updated_at")
+      .order("updated_at", { ascending: false })
+      .then(
+        ({ data, error }) => {
+          if (cancelled) return;
           if (error) setMessage(error.message);
           else setProjects(data || []);
-        });
+          setProjectsLoading(false);
+        },
+        () => {
+          if (!cancelled) {
+            setMessage("Unable to load your projects. Refresh to try again.");
+            setProjectsLoading(false);
+          }
+        },
+      );
+    return () => {
+      cancelled = true;
+    };
   }, [session?.user.id]);
   async function authenticate(e: React.FormEvent) {
     e.preventDefault();
@@ -167,6 +187,8 @@ export default function Account({ session }: { session: Session | null }) {
       setDeleting(false);
     }
   }
+  if (session && projectsLoading)
+    return <LoadingScreen message="Loading your projects…" />;
   return (
     <main className="account-page">
       <header className="account-header">

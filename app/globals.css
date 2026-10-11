@@ -1629,3 +1629,63 @@ textarea:disabled {
   max-height: calc(100vh - 16px);
   overflow-y: auto;
 }
+
+.studio-loading {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 40px;
+  background: #fafbf8;
+  color: #284c38;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.studio-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+}
+.studio-loading-card {
+  text-align: center;
+  max-width: 380px;
+}
+.studio-loading-card h1 {
+  font-size: 22px;
+  margin: 20px 0 10px;
+}
+.studio-loading-card p {
+  font-size: 13px;
+  color: #778176;
+  line-height: 1.6;
+}
+.studio-spinner {
+  display: inline-block;
+  width: 36px;
+  height: 36px;
+  border: 3px solid #e9e3fa;
+  border-top-color: #8061ee;
+  border-radius: 50%;
+  animation: studio-spin 0.9s linear infinite;
+}
+.studio-loading-slow {
+  margin-top: 24px;
+}
+.studio-loading-slow a {
+  display: block;
+  margin-top: 16px;
+  color: #8061ee;
+  font-size: 12px;
+}
+@keyframes studio-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio-spinner {
+    animation: none;
+    border-top-color: #8061ee;
+  }
+}
