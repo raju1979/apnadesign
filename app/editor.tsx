@@ -332,6 +332,14 @@ export default function Editor({
   session: Session;
   roomId: string;
 }) {
+  const [textEdit, setTextEdit] = useState<{
+    id: string;
+    pageId: string;
+    original: string;
+    value: string;
+    conflict?: boolean;
+  } | null>(null);
+  const inlineTextInput = useRef<HTMLTextAreaElement>(null);
   const [documentLoaded, setDocumentLoaded] = useState(false);
   const [geometryLoaded, setGeometryLoaded] = useState(false);
   const [fontsLoaded, setFontsLoaded] = useState(false);
@@ -891,6 +899,74 @@ export default function Editor({
       ),
     );
   }
+  function beginTextEdit(shape: Shape) {
+    if (
+      !editable ||
+      isLocked(shape, activeShapes) ||
+      spacePanning ||
+      tool === "hand"
+    )
+      return;
+    setSelected(shape.id);
+    setTextEdit({
+      id: shape.id,
+      pageId: activePage.id,
+      original: shape.text || "",
+      value: shape.text || "",
+    });
+  }
+  function finishTextEdit(cancel = false) {
+    if (!textEdit) return;
+    if (cancel) {
+      setTextEdit(null);
+      return;
+    }
+    const shapes = getPageShapes(docRef.current, textEdit.pageId);
+    const shape = shapes.find((s) => s.id === textEdit.id);
+    if (!editable || !shape || isLocked(shape, shapes)) {
+      setTextEdit(null);
+      return;
+    }
+    if (textEdit.value === textEdit.original) {
+      setTextEdit(null);
+      return;
+    }
+    if ((shape.text || "") !== textEdit.original) {
+      setTextEdit((current) =>
+        current ? { ...current, conflict: true } : null,
+      );
+      return;
+    }
+    commit({
+      kind: "patch_if",
+      id: shape.id,
+      pageId: textEdit.pageId,
+      expected: { text: shape.text },
+      patch: { text: textEdit.value },
+    });
+    setTextEdit(null);
+  }
+  const editingShape =
+    textEdit && activeShapes.find((s) => s.id === textEdit.id);
+  useEffect(() => {
+    if (
+      textEdit &&
+      (!editable ||
+        textEdit.pageId !== activePage.id ||
+        !editingShape ||
+        isHidden(editingShape, activeShapes) ||
+        isLocked(editingShape, activeShapes))
+    )
+      setTextEdit(null);
+  }, [editable, activePage.id, activeShapes, textEdit?.id]);
+  useEffect(() => {
+    if (!textEdit) return;
+    const frame = requestAnimationFrame(() => {
+      inlineTextInput.current?.focus();
+      inlineTextInput.current?.select();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [textEdit?.id]);
   function beginMove(shape: Shape) {
     const target = selectionIds.has(shape.id)
       ? shape.id
@@ -2218,6 +2294,63 @@ export default function Editor({
               )}
             </div>
           )}
+          {textEdit && editingShape && (
+            <div
+              className="inline-text-editor"
+              style={{
+                left: pan.x + editingShape.x * zoom,
+                top: pan.y + editingShape.y * zoom,
+                width: editingShape.width,
+                transform: `rotate(${editingShape.rotation}deg) scale(${zoom})`,
+              }}
+            >
+              <textarea
+                ref={inlineTextInput}
+                aria-label="Edit text on canvas"
+                maxLength={9999}
+                value={textEdit.value}
+                style={{
+                  minHeight: editingShape.height,
+                  fontSize: editingShape.fontSize || 24,
+                  fontFamily: editingShape.fontFamily || "Arial",
+                  color: editingShape.fill,
+                  fontWeight: editingShape.fontStyle?.includes("bold")
+                    ? "bold"
+                    : "normal",
+                  fontStyle: editingShape.fontStyle?.includes("italic")
+                    ? "italic"
+                    : "normal",
+                  textAlign: editingShape.align || "left",
+                }}
+                onChange={(e) =>
+                  setTextEdit((current) =>
+                    current ? { ...current, value: e.target.value } : null,
+                  )
+                }
+                onBlur={() => finishTextEdit()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    finishTextEdit(true);
+                  } else if (
+                    e.key === "Enter" &&
+                    !e.shiftKey &&
+                    !e.nativeEvent.isComposing
+                  ) {
+                    e.preventDefault();
+                    finishTextEdit();
+                  }
+                }}
+              />
+              {textEdit.conflict && (
+                <p role="alert">
+                  Text changed by a collaborator. Copy your draft, then press
+                  Escape to close.
+                </p>
+              )}
+            </div>
+          )}
           <Stage
             ref={stage}
             width={size.width}
@@ -2357,6 +2490,7 @@ export default function Editor({
                       tool === "select" &&
                       !spacePanning &&
                       !canvasDragging &&
+                      !textEdit &&
                       s.type !== "group" &&
                       !isLocked(s, activeShapes),
                     onClick: (e: Konva.KonvaEventObject<MouseEvent>) =>
@@ -2475,10 +2609,9 @@ export default function Editor({
                       fontStyle={s.fontStyle || "normal"}
                       align={s.align || "left"}
                       lineHeight={1.2}
-                      onDblClick={() => {
-                        setSelected(s.id);
-                        setNotice("Edit this text in the right panel.");
-                      }}
+                      opacity={textEdit?.id === s.id ? 0 : 1}
+                      onDblClick={() => beginTextEdit(s)}
+                      onDblTap={() => beginTextEdit(s)}
                     />
                   );
                 })}

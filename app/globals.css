@@ -1689,3 +1689,32 @@ textarea:disabled {
     border-top-color: #8061ee;
   }
 }
+
+.inline-text-editor {
+  position: absolute;
+  z-index: 30;
+  transform-origin: top left;
+}
+.inline-text-editor textarea {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 1px solid #8061ee;
+  background: #ffffffed;
+  line-height: 1.2;
+  resize: none;
+  box-sizing: border-box;
+  overflow: auto;
+}
+.inline-text-editor p {
+  background: #fff;
+  color: #a13a33;
+  font:
+    14px/1.5 Arial,
+    sans-serif;
+  padding: 8px;
+  margin: 4px 0 0;
+}

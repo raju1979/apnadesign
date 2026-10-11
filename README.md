@@ -93,3 +93,5 @@ MIT — see [LICENSE](LICENSE).
 Rust/WASM now computes individual object bounds in a single batch for box selection and snap-guide preparation. Snapping prepares a sorted anchor index once per drag and performs binary searches on pointer updates; collaborator document changes invalidate the index. JavaScript remains a fallback when WASM cannot load.
 
 Run `npm run benchmark:geometry` to compare 1,000- and 5,000-object scenes. See [benchmark results and methodology](benchmarks/RESULTS.md). These measurements cover geometry CPU time, not whole-editor frame rates.
+
+Double-click text on the canvas to edit it inline (double-tap on touch devices). Enter saves, Shift+Enter inserts a new line, Escape cancels, and clicking away saves. Locked and view-only text cannot be edited. If a collaborator changes the same text while you are typing, your draft stays available to copy instead of overwriting their update.
