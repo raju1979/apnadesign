@@ -362,6 +362,13 @@ export default function Editor({
       end: { x: number; y: number };
       additive: boolean;
     } | null>(null),
+    [draft, setDraft] = useState<{
+      tool: "rect" | "ellipse" | "frame";
+      start: { x: number; y: number };
+      end: { x: number; y: number };
+      shift: boolean;
+      alt: boolean;
+    } | null>(null),
     [guides, setGuides] = useState<{ axis: "x" | "y"; value: number }[]>([]),
     [snapEnabled, setSnapEnabled] = useState(true),
     [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(
@@ -398,6 +405,7 @@ export default function Editor({
     container = useRef<HTMLDivElement>(null),
     canvasSize = useRef<{ width: number; height: number } | null>(null),
     imageInput = useRef<HTMLInputElement>(null),
+    draftClick = useRef(false),
     dragSession = useRef<{
       snap: ReturnType<typeof prepareSnapMove>;
       snapShapes: Shape[];
@@ -804,17 +812,19 @@ export default function Editor({
     }
   }, [activeShapes, selected, extraSelected]);
   useEffect(() => {
-    if (!marquee) return;
+    if (!marquee && !draft) return;
     const cancel = (event: MouseEvent) => {
       if (
         !(event.target instanceof Element) ||
         !container.current?.contains(event.target)
-      )
+      ) {
         setMarquee(null);
+        setDraft(null);
+      }
     };
     window.addEventListener("mouseup", cancel);
     return () => window.removeEventListener("mouseup", cancel);
-  }, [marquee]);
+  }, [marquee, draft]);
   function selectIds(ids: string[]) {
     setPrimarySelected(ids[0]);
     setExtraSelected(ids.slice(1));
@@ -1495,7 +1505,58 @@ export default function Editor({
     setSelected(undefined);
     setTool("select");
   }
-  function add(type: Shape["type"], x?: number, y?: number) {
+  /**
+   * Begin a drag-to-create gesture from a press. Frame backgrounds are their own
+   * Konva nodes, so the stage alone cannot catch presses that land inside one.
+   */
+  function startShapeDraft(
+    shapeTool: "rect" | "ellipse" | "frame",
+    shift: boolean,
+    alt: boolean,
+  ) {
+    const p = stage.current?.getPointerPosition();
+    if (!p) return;
+    const point = { x: (p.x - pan.x) / zoom, y: (p.y - pan.y) / zoom };
+    setDraft({ tool: shapeTool, start: point, end: point, shift, alt });
+  }
+  /**
+   * Resolve a pointer drag into a page-space rectangle.
+   * Shift constrains to a square/circle, Alt draws outward from the start point,
+   * and dragging up or left still yields positive width and height.
+   */
+  function draftRect(
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    modifiers: { shift: boolean; alt: boolean },
+  ) {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    if (modifiers.shift) {
+      const edge = Math.max(Math.abs(dx), Math.abs(dy));
+      dx = (dx < 0 ? -1 : 1) * edge;
+      dy = (dy < 0 ? -1 : 1) * edge;
+    }
+    return modifiers.alt
+      ? {
+          x: start.x - Math.abs(dx),
+          y: start.y - Math.abs(dy),
+          width: Math.abs(dx) * 2,
+          height: Math.abs(dy) * 2,
+        }
+      : {
+          x: Math.min(start.x, start.x + dx),
+          y: Math.min(start.y, start.y + dy),
+          width: Math.abs(dx),
+          height: Math.abs(dy),
+        };
+  }
+
+  function add(
+    type: Shape["type"],
+    x?: number,
+    y?: number,
+    size?: { width: number; height: number },
+  ) {
     if (!editable) return;
     let px = x ?? 220,
       py = y ?? 200;
@@ -1511,8 +1572,10 @@ export default function Editor({
         py = 65;
       }
     }
-    const width = type === "frame" ? 800 : type === "text" ? 260 : 160;
-    const height = type === "frame" ? 600 : type === "text" ? 60 : 120;
+    const width =
+      size?.width ?? (type === "frame" ? 800 : type === "text" ? 260 : 160);
+    const height =
+      size?.height ?? (type === "frame" ? 600 : type === "text" ? 60 : 120);
     const shape: Shape = {
       id: "s" + crypto.randomUUID().replaceAll("-", ""),
       type,
@@ -2392,9 +2455,25 @@ export default function Editor({
                   y: p.y - e.evt.deltaY,
                 }));
             }}
-            onMouseMove={() => {
-              if (marquee) {
-                const p = stage.current?.getPointerPosition();
+            onMouseMove={(e) => {
+              const pointer = stage.current?.getPointerPosition();
+              if (draft) {
+                if (pointer)
+                  setDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          end: {
+                            x: (pointer.x - pan.x) / zoom,
+                            y: (pointer.y - pan.y) / zoom,
+                          },
+                          shift: e.evt.shiftKey,
+                          alt: e.evt.altKey,
+                        }
+                      : null,
+                  );
+              } else if (marquee) {
+                const p = pointer;
                 if (p)
                   setMarquee((current) =>
                     current
@@ -2410,10 +2489,22 @@ export default function Editor({
               }
               if (Date.now() - lastPresence.current < 50) return;
               lastPresence.current = Date.now();
-              const p = stage.current?.getPointerPosition();
+              const p = pointer;
               if (p) presence((p.x - pan.x) / zoom, (p.y - pan.y) / zoom);
             }}
-            onMouseUp={() => {
+            onMouseUp={(e) => {
+              if (draft) {
+                const rect = draftRect(draft.start, draft.end, {
+                  shift: e.evt.shiftKey || draft.shift,
+                  alt: e.evt.altKey || draft.alt,
+                });
+                setDraft(null);
+                // A plain click with no drag keeps the previous default size.
+                if (rect.width < 3 || rect.height < 3)
+                  add(draft.tool, draft.start.x, draft.start.y);
+                else add(draft.tool, rect.x, rect.y, rect);
+                return;
+              }
               if (!marquee) return;
               const box = {
                 x: Math.min(marquee.start.x, marquee.end.x),
@@ -2434,14 +2525,11 @@ export default function Editor({
               if (e.evt.button !== 0) return;
               if (e.target === stage.current) {
                 if (tool === "hand" || spacePanning || canvasDragging) return;
-                if (
-                  tool === "rect" ||
-                  tool === "ellipse" ||
-                  tool === "text" ||
-                  tool === "frame"
-                ) {
+                if (tool === "rect" || tool === "ellipse" || tool === "frame") {
+                  startShapeDraft(tool, e.evt.shiftKey, e.evt.altKey);
+                } else if (tool === "text") {
                   const p = stage.current!.getPointerPosition()!;
-                  add(tool, (p.x - pan.x) / zoom, (p.y - pan.y) / zoom);
+                  add("text", (p.x - pan.x) / zoom, (p.y - pan.y) / zoom);
                 } else {
                   const p = stage.current!.getPointerPosition()!;
                   const point = {
@@ -2493,13 +2581,35 @@ export default function Editor({
                       !textEdit &&
                       s.type !== "group" &&
                       !isLocked(s, activeShapes),
-                    onClick: (e: Konva.KonvaEventObject<MouseEvent>) =>
-                      tool === "select" &&
-                      !spacePanning &&
+                    onClick: (e: Konva.KonvaEventObject<MouseEvent>) => {
+                      if (draftClick.current) {
+                        draftClick.current = false;
+                        return;
+                      }
+                      if (tool !== "select" || spacePanning) return;
                       selectItem(
                         e.evt.altKey ? s.id : selectionTarget(s, activeShapes),
                         e.evt.shiftKey,
-                      ),
+                      );
+                    },
+                    onMouseDown: (e: Konva.KonvaEventObject<MouseEvent>) => {
+                      // A frame is a filled node, so presses inside it never
+                      // reach the stage. Keep drag-to-create working there.
+                      if (
+                        s.type !== "frame" ||
+                        e.evt.button !== 0 ||
+                        (tool !== "rect" &&
+                          tool !== "ellipse" &&
+                          tool !== "frame") ||
+                        spacePanning ||
+                        canvasDragging ||
+                        textEdit
+                      )
+                        return;
+                      e.cancelBubble = true;
+                      draftClick.current = true;
+                      startShapeDraft(tool, e.evt.shiftKey, e.evt.altKey);
+                    },
                     onContextMenu: (
                       e: Konva.KonvaEventObject<PointerEvent>,
                     ) => {
@@ -2627,6 +2737,36 @@ export default function Editor({
                   listening={false}
                 />
               )}
+              {draft &&
+                (() => {
+                  const r = draftRect(draft.start, draft.end, {
+                    shift: draft.shift,
+                    alt: draft.alt,
+                  });
+                  return draft.tool === "ellipse" ? (
+                    <Ellipse
+                      x={r.x + r.width / 2}
+                      y={r.y + r.height / 2}
+                      radiusX={Math.max(r.width / 2, 0.5)}
+                      radiusY={Math.max(r.height / 2, 0.5)}
+                      fill="#8064ec18"
+                      stroke="#8064ec"
+                      strokeWidth={1 / zoom}
+                      listening={false}
+                    />
+                  ) : (
+                    <Rect
+                      x={r.x}
+                      y={r.y}
+                      width={r.width}
+                      height={r.height}
+                      fill="#8064ec18"
+                      stroke="#8064ec"
+                      strokeWidth={1 / zoom}
+                      listening={false}
+                    />
+                  );
+                })()}
               {guides.map((guide, index) => (
                 <Line
                   key={index}
@@ -2789,7 +2929,7 @@ export default function Editor({
               ? "V select · Space / middle mouse + drag to pan · F frame · R rectangle · O ellipse · T text"
               : tool === "hand"
                 ? "Drag to move around your canvas"
-                : `Click the canvas to add ${tool === "ellipse" ? "an" : "a"} ${tool} · Space / middle mouse + drag to pan`}
+                : `Drag to draw ${tool === "ellipse" ? "an" : "a"} ${tool} · Shift for a square · Alt from centre · Click for default size`}
             <span>⌘/Ctrl + \ panels · ⌘ + scroll to zoom</span>
           </div>
         </section>
